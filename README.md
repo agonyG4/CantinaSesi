@@ -30,12 +30,16 @@ cargo build --workspace
 cargo run -p cantina-api
 cargo run -p cantina-cli -- health
 cargo run -p cantina-cli -- products list
+cargo run -p cantina-cli -- products list --all
 cargo run -p cantina-cli -- products show product_coxinha
 cargo run -p cantina-cli -- categories list
 cargo test --workspace
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+`products list` lists available products by default; `--all` (alias
+`--include-unavailable`) also lists unavailable ones.
 
 The read-only catalog endpoints are described in `docs/api/catalog.md` and in
 the OpenAPI document served by the API at `GET /api/openapi.json`.
@@ -47,5 +51,19 @@ application services with the infrastructure adapters; the CLI
 (`cantina-cli`) is a thin administrative client that talks to the running API
 over HTTP — it never touches the database. Every future frontend (web, mobile,
 desktop) connects to the same API contract.
+
+```mermaid
+graph LR
+    CORE["cantina-core"]
+    APP["cantina-application"] --> CORE
+    INFRA["cantina-infrastructure"] --> APP
+    API["cantina-api"] --> APP
+    API --> INFRA
+    CLI["cantina-cli"] -. "HTTP" .-> API
+```
+
+`cantina-core` depends on no workspace crate; `cantina-application` owns the
+ports the infrastructure adapters implement; `cantina-api` is the composition
+root; `cantina-cli` is an HTTP client and never touches storage.
 
 See `docs/architecture/backend.md` for the full architecture.

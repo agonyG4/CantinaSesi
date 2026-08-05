@@ -10,12 +10,13 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use tower_http::request_id::RequestId;
+use utoipa::ToSchema;
 
 use cantina_application::ApplicationError;
 
 /// Standardized error payload returned to clients.
-#[derive(Debug, Serialize)]
-struct ErrorBody {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ErrorBody {
     code: &'static str,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -23,8 +24,8 @@ struct ErrorBody {
 }
 
 /// Standardized error response envelope.
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct ErrorResponse {
     error: ErrorBody,
 }
 

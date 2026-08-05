@@ -69,17 +69,18 @@ Allowed (strict, one way only):
 
 ```mermaid
 graph LR
-    CORE["cantina-core"] --> APP["cantina-application"]
-    APP --> INFRA["cantina-infrastructure"]
-    APP --> API["cantina-api"]
-    INFRA --> API
+    CORE["cantina-core"]
+    APP["cantina-application"] --> CORE
+    INFRA["cantina-infrastructure"] --> APP
+    API["cantina-api"] --> APP
+    API --> INFRA
     CLI["cantina-cli"] -. "HTTP" .-> API
 ```
 
-* `cantina-core` has no dependencies.
+* `cantina-core` depends on no workspace crate.
 * `cantina-application` depends on `cantina-core`.
-* `cantina-infrastructure` depends on `cantina-application` and `cantina-core`.
-* `cantina-api` depends on the crates it needs to compose the running service.
+* `cantina-infrastructure` depends on `cantina-application` (and, transitively, `cantina-core`).
+* `cantina-api` depends on `cantina-application` and `cantina-infrastructure` to compose the running service.
 * `cantina-cli` depends on neither `cantina-infrastructure` nor the storage
   layer; it communicates with the API over HTTP.
 
@@ -185,7 +186,7 @@ graph TD
     UI["Web UI"] --> API["cantina-api"]
     MOB["Mobile app"] --> API
     DESK["Desktop app"] --> API
-    CLI["cantina-cli"] --> API
+    CLI["cantina-cli"] -. "HTTP" .-> API
     API --> APP["cantina-application"]
     APP --> CORE["cantina-core"]
     APP -->|ports| INFRA["cantina-infrastructure"]

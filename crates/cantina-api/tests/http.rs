@@ -1,5 +1,8 @@
 //! Integration tests over the HTTP adapter.
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -8,12 +11,64 @@ use tower::util::ServiceExt;
 
 use cantina_api::app;
 use cantina_api::bootstrap;
+use cantina_api::state::AppState;
+use cantina_application::auth::AuthService;
+use cantina_application::catalog::CatalogService;
+use cantina_application::orders::OrderService;
+use cantina_application::ports::{
+    Clock, IdGenerator, PickupCodeGenerator, ProductRepository, RepositoryError,
+};
+use cantina_core::catalog::{Product, ProductId};
 use cantina_infrastructure::config::Config;
+use cantina_infrastructure::identifiers::{DefaultPickupCodeGenerator, Generator};
 use cantina_infrastructure::persistence::InMemoryRepositories;
+use cantina_infrastructure::time::SystemClock;
 
+/// Product repository that always fails, simulating a storage outage.
+struct FailingProductRepository;
+
+#[async_trait]
+impl ProductRepository for FailingProductRepository {
+    async fn find_product_by_id(
+        &self,
+        _id: &ProductId,
+    ) -> Result<Option<Product>, RepositoryError> {
+        Err(RepositoryError::new("injected storage failure"))
+    }
+
+    async fn list_products(&self) -> Result<Vec<Product>, RepositoryError> {
+        Err(RepositoryError::new("injected storage failure"))
+    }
+}
+
+/// Router backed by the seeded in-memory repositories.
 async fn router() -> axum::Router<()> {
     let repositories = InMemoryRepositories::with_seed_data().expect("seed repositories");
     let state = bootstrap::build_state(repositories);
+    app(state, &Config::development())
+}
+
+/// Router whose catalog is backed by a failing product repository.
+async fn failing_router() -> axum::Router<()> {
+    let repositories = InMemoryRepositories::with_seed_data().expect("seed repositories");
+    let ids: Arc<dyn IdGenerator> = Arc::new(Generator::new());
+    let pickup_codes: Arc<dyn PickupCodeGenerator> = Arc::new(DefaultPickupCodeGenerator::new());
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+
+    let state = AppState::new(
+        Arc::new(CatalogService::new(
+            Arc::new(FailingProductRepository),
+            repositories.categories.clone(),
+        )),
+        Arc::new(OrderService::new(
+            repositories.orders.clone(),
+            Arc::new(FailingProductRepository),
+            ids,
+            pickup_codes,
+            clock,
+        )),
+        Arc::new(AuthService::new(repositories.users.clone())),
+    );
     app(state, &Config::development())
 }
 
@@ -31,6 +86,22 @@ async fn raw_get(uri: &str) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
 
 async fn get(uri: &str) -> (StatusCode, axum::http::HeaderMap, Value) {
     let (status, headers, body) = raw_get(uri).await;
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    (status, headers, json)
+}
+
+async fn get_from(
+    router: &axum::Router<()>,
+    uri: &str,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let response = router
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     (status, headers, json)
 }
@@ -151,6 +222,36 @@ async fn product_list_searches_by_name() {
 }
 
 #[tokio::test]
+async fn product_list_combines_filters() {
+    let (status, _, json) =
+        get("/api/v1/products?category_id=category_snacks&search=queijo&include_unavailable=true")
+            .await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(
+        items.len(),
+        1,
+        "category, search and availability filters must all apply"
+    );
+    assert_eq!(items[0]["id"], "product_pastel");
+}
+
+#[tokio::test]
+async fn product_list_returns_empty_items_for_no_match() {
+    let (status, headers, json) = get("/api/v1/products?search=does-not-exist").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers["content-type"], "application/json",
+        "even empty results must use JSON content type"
+    );
+    assert_eq!(
+        json["items"],
+        serde_json::json!([]),
+        "no match must be an empty 200 envelope, not an error"
+    );
+}
+
+#[tokio::test]
 async fn product_list_is_sorted_by_name() {
     let (status, _, json) = get("/api/v1/products?include_unavailable=true").await;
     assert_eq!(status, StatusCode::OK);
@@ -172,10 +273,18 @@ async fn product_list_is_sorted_by_name() {
 }
 
 #[tokio::test]
-async fn invalid_product_query_returns_invalid_query_error() {
+async fn invalid_product_query_returns_stable_invalid_query_error() {
     let (status, _, json) = get("/api/v1/products?include_unavailable=not-a-bool").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["error"]["code"], "INVALID_QUERY");
+    assert_eq!(
+        json["error"]["message"], "the catalog query is invalid",
+        "the message must be stable and must not leak parser internals"
+    );
+    assert!(
+        json["error"]["request_id"].is_string(),
+        "request id must be attached"
+    );
 }
 
 #[tokio::test]
@@ -202,8 +311,72 @@ async fn openapi_document_is_served_as_json() {
     assert_eq!(json["openapi"], "3.1.0");
     assert_eq!(json["info"]["title"], "CantinaSesi API");
     let paths = json["paths"].as_object().unwrap();
-    assert!(paths.contains_key("/api/v1/products"));
-    assert!(paths.contains_key("/api/v1/products/{id}"));
-    assert!(paths.contains_key("/api/v1/categories"));
-    assert!(paths.contains_key("/api/v1/categories/{id}"));
+    for path in [
+        "/health",
+        "/api/v1/health",
+        "/api/v1/products",
+        "/api/v1/products/{product_id}",
+        "/api/v1/categories",
+        "/api/v1/categories/{category_id}",
+    ] {
+        assert!(paths.contains_key(path), "missing OpenAPI path: {path}");
+    }
+}
+
+#[tokio::test]
+async fn openapi_document_describes_expected_schemas() {
+    let (_, _, json) = get("/api/openapi.json").await;
+    let schemas = json["components"]["schemas"].as_object().unwrap();
+    for schema in [
+        "HealthResponse",
+        "ProductResponse",
+        "ProductListResponse",
+        "ListProductsParams",
+        "CategoryResponse",
+        "CategoryListResponse",
+        "ErrorResponse",
+        "ErrorBody",
+    ] {
+        assert!(
+            schemas.contains_key(schema),
+            "missing OpenAPI schema: {schema}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn openapi_product_list_documents_query_and_error_response() {
+    let (_, _, json) = get("/api/openapi.json").await;
+    let operation = &json["paths"]["/api/v1/products"]["get"];
+    let parameters = operation["parameters"].as_array().unwrap();
+    let names: Vec<&str> = parameters
+        .iter()
+        .map(|parameter| parameter["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"category_id"));
+    assert!(names.contains(&"search"));
+    assert!(names.contains(&"include_unavailable"));
+    let error_response = &operation["responses"]["400"]["content"]["application/json"]["schema"];
+    assert_eq!(
+        error_response["$ref"].as_str().unwrap(),
+        "#/components/schemas/ErrorResponse"
+    );
+}
+
+#[tokio::test]
+async fn storage_failure_returns_centralized_internal_error() {
+    let router = failing_router().await;
+    let (status, _, json) = get_from(&router, "/api/v1/products").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(json["error"]["code"], "INTERNAL_ERROR");
+    assert_eq!(json["error"]["message"], "internal server error");
+    assert!(
+        json["error"]["request_id"].is_string(),
+        "request id must be attached"
+    );
+    let body = serde_json::to_string(&json).unwrap();
+    assert!(
+        !body.contains("injected storage failure"),
+        "internal storage details must never leak to clients"
+    );
 }

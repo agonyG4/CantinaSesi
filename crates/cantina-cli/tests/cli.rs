@@ -16,8 +16,20 @@ fn parse_request_line(line: &str) -> (String, String) {
 }
 
 /// Starts a tiny HTTP server that accepts a single request and answers it
-/// with the given router. Returns the base URL and the serving thread.
+/// with the given router. The router receives the path without the query.
+/// Returns the base URL and the serving thread.
 fn start_server(
+    route: impl Fn(&str) -> (u16, String) + Send + 'static,
+) -> (String, std::thread::JoinHandle<()>) {
+    start_server_raw(move |request_line| {
+        let (_, path) = parse_request_line(request_line);
+        route(&path)
+    })
+}
+
+/// Starts a tiny HTTP server like [`start_server`] but passes the whole
+/// request line (including the query string) to the router.
+fn start_server_raw(
     route: impl Fn(&str) -> (u16, String) + Send + 'static,
 ) -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -30,13 +42,34 @@ fn start_server(
 
         let text = String::from_utf8_lossy(&buffer).to_string();
         let request_line = text.lines().next().unwrap_or("").to_string();
-        let (_, path) = parse_request_line(&request_line);
-        let (status, body) = route(&path);
+        let (status, body) = route(&request_line);
 
         let reason = if status == 200 { "OK" } else { "ERROR" };
         let response = format!(
             "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+    });
+
+    (format!("http://{address}"), handle)
+}
+
+/// Starts a server that advertises a 1000-byte body but sends only a few
+/// bytes before closing, forcing the client body read to fail mid-transfer.
+fn start_truncated_server(status: u16) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 4096];
+        let _ = stream.read(&mut buffer);
+
+        let reason = if status == 200 { "OK" } else { "ERROR" };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{{\"error\":{{\"code\":\"INTERNAL\""
         );
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.flush();
@@ -136,7 +169,7 @@ fn invalid_api_url_is_reported() {
 }
 
 #[test]
-fn products_list_prints_human_rows() {
+fn products_list_prints_deterministic_table() {
     let (url, server) = start_server(move |path| {
         if path == "/api/v1/products" {
             (200, PRODUCTS_BODY.to_string())
@@ -160,9 +193,27 @@ fn products_list_prints_human_rows() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("3 products"), "unexpected stdout: {stdout}");
+    let header: Vec<&str> = stdout.lines().nth(1).unwrap().split_whitespace().collect();
+    assert_eq!(
+        header,
+        vec!["ID", "NAME", "PRICE", "CATEGORY", "AVAILABILITY"],
+        "a deterministic header must be rendered"
+    );
+    assert!(
+        stdout.contains("product_brigadeiro"),
+        "product ids must appear in the human output: {stdout}"
+    );
+    assert!(
+        stdout.contains("product_refresco"),
+        "product ids must appear in the human output: {stdout}"
+    );
     assert!(stdout.contains("Brigadeiro"), "unexpected stdout: {stdout}");
     assert!(stdout.contains("R$ 5,00"), "unexpected stdout: {stdout}");
     assert!(stdout.contains("R$ 7,50"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("category_snacks"),
+        "category ids must appear in the human output: {stdout}"
+    );
 
     server.join().unwrap();
 }
@@ -315,4 +366,200 @@ fn products_create_exits_non_zero_until_implemented() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("not implemented"));
+}
+
+#[test]
+fn all_and_include_unavailable_send_the_same_query() {
+    let all_url = run_query_probe_server();
+    let alias_url = run_query_probe_server();
+
+    let all = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&all_url)
+        .arg("products")
+        .arg("list")
+        .arg("--all")
+        .output()
+        .unwrap();
+    assert!(
+        all.status.success(),
+        "--all must map to include_unavailable=true, stderr: {}",
+        String::from_utf8_lossy(&all.stderr)
+    );
+
+    let alias = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&alias_url)
+        .arg("products")
+        .arg("list")
+        .arg("--include-unavailable")
+        .output()
+        .unwrap();
+    assert!(
+        alias.status.success(),
+        "--include-unavailable must behave exactly like --all, stderr: {}",
+        String::from_utf8_lossy(&alias.stderr)
+    );
+}
+
+/// Starts a server that only accepts the canonical `include_unavailable=true`
+/// query, proving whatever flag produced the request sent that exact query.
+fn run_query_probe_server() -> String {
+    let (url, server) = start_server_raw(move |request_line| {
+        let raw_path = request_line.split_whitespace().nth(1).unwrap_or("/");
+        let query = raw_path.split('?').nth(1).unwrap_or("");
+        if query == "include_unavailable=true" {
+            (200, PRODUCTS_BODY.to_string())
+        } else {
+            (
+                400,
+                format!(
+                    r#"{{"error":{{"code":"INVALID_QUERY","message":"unexpected query: {query}"}}}}"#
+                ),
+            )
+        }
+    });
+    drop(server);
+    url
+}
+
+#[test]
+fn products_list_help_documents_all_and_alias() {
+    let output = Command::new(BIN)
+        .arg("products")
+        .arg("list")
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("--all"),
+        "help must document the canonical --all flag: {stdout}"
+    );
+    assert!(
+        stdout.contains("include-unavailable"),
+        "help must document the --include-unavailable alias: {stdout}"
+    );
+}
+
+#[test]
+fn products_list_reports_internal_server_error() {
+    let body = r#"{"error":{"code":"INTERNAL_ERROR","message":"internal server error","request_id":"req-9"}}"#;
+    let (url, server) = start_server(move |_| (500, body.to_string()));
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("products")
+        .arg("list")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("HTTP 500"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("internal server error"),
+        "structured error message must surface: {stderr}"
+    );
+
+    server.join().unwrap();
+}
+
+#[test]
+fn products_list_with_malformed_success_body_reports_decode_error() {
+    let (url, server) = start_server(move |_| (200, "this is not json".to_string()));
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("products")
+        .arg("list")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("invalid response from the API"),
+        "malformed success bodies must report a decode error: {stderr}"
+    );
+
+    server.join().unwrap();
+}
+
+#[test]
+fn products_list_with_empty_success_body_reports_malformed_success() {
+    let (url, server) = start_server(move |_| (200, String::new()));
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("products")
+        .arg("list")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("without a response body"),
+        "an empty 200 body must be reported explicitly: {stderr}"
+    );
+
+    server.join().unwrap();
+}
+
+#[test]
+fn products_show_with_malformed_error_body_retains_status() {
+    let (url, server) = start_server(move |_| (500, "not an error envelope".to_string()));
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("products")
+        .arg("show")
+        .arg("product_x")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("HTTP 500"),
+        "the HTTP status must be retained: {stderr}"
+    );
+    assert!(
+        !stderr.contains("UNKNOWN"),
+        "malformed error bodies must not fall back to a fake UNKNOWN code: {stderr}"
+    );
+
+    server.join().unwrap();
+}
+
+#[test]
+fn products_list_body_read_failure_is_reported() {
+    let (url, server) = start_truncated_server(500);
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("products")
+        .arg("list")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("failed to read the API response body"),
+        "a mid-transfer body failure must be a typed error: {stderr}"
+    );
+    assert!(
+        !stderr.contains("UNKNOWN"),
+        "a body-read failure must never degrade to an UNKNOWN error: {stderr}"
+    );
+
+    server.join().unwrap();
 }

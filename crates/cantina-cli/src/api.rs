@@ -118,6 +118,19 @@ pub enum CliError {
         request_id: Option<String>,
     },
 
+    /// The API responded with a non-success status whose body was not a
+    /// structured error envelope.
+    #[error("the API returned HTTP {status}: {reason}")]
+    MalformedErrorResponse { status: u16, reason: String },
+
+    /// The error response body could not be read from the wire.
+    #[error("failed to read the API response body from {url}: {source}")]
+    ResponseBodyRead {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+
     /// The API returned a successful status but an unparseable body.
     #[error("invalid response from the API: {source}")]
     ResponseDecode {
@@ -229,7 +242,7 @@ impl ApiClient {
 
         let status = response.status();
         if !status.is_success() {
-            return Err(self.error_from_response(status, response).await);
+            return Err(self.error_from_response(status, response).await?);
         }
 
         let bytes = response
@@ -251,26 +264,30 @@ impl ApiClient {
         &self,
         status: StatusCode,
         response: reqwest::Response,
-    ) -> CliError {
+    ) -> Result<CliError, CliError> {
         let status_code = status.as_u16();
-        let bytes = response.bytes().await.unwrap_or_default();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|source| CliError::ResponseBodyRead {
+                url: self.base_url.to_string(),
+                source,
+            })?;
         if let Ok(envelope) = serde_json::from_slice::<ApiErrorEnvelope>(&bytes) {
-            CliError::ApiErrorResponse {
+            Ok(CliError::ApiErrorResponse {
                 status: status_code,
                 code: envelope.error.code,
                 message: envelope.error.message,
                 request_id: envelope.error.request_id,
-            }
+            })
         } else {
-            CliError::ApiErrorResponse {
+            Ok(CliError::MalformedErrorResponse {
                 status: status_code,
-                code: "UNKNOWN".to_string(),
-                message: status
+                reason: status
                     .canonical_reason()
                     .unwrap_or("the API returned an error")
                     .to_string(),
-                request_id: None,
-            }
+            })
         }
     }
 }

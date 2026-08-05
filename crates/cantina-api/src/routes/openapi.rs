@@ -7,7 +7,9 @@ use axum::Json;
 use utoipa::OpenApi;
 
 use super::categories::{CategoryListResponse, CategoryResponse};
+use super::health::HealthResponse;
 use super::products::{ListProductsParams, ProductListResponse, ProductResponse};
+use crate::error::{ErrorBody, ErrorResponse};
 
 /// Combined OpenAPI description for the versioned API.
 #[derive(OpenApi)]
@@ -18,17 +20,22 @@ use super::products::{ListProductsParams, ProductListResponse, ProductResponse};
         version = "0.1.0"
     ),
     paths(
+        super::health::health,
+        super::health::versioned_health,
         super::products::list_products,
         super::products::get_product,
         super::categories::list_categories,
         super::categories::get_category,
     ),
     components(schemas(
+        HealthResponse,
         ProductResponse,
         ProductListResponse,
         ListProductsParams,
         CategoryResponse,
         CategoryListResponse,
+        ErrorResponse,
+        ErrorBody,
     ))
 )]
 pub struct ApiDoc;

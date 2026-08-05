@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 
 use cantina_core::catalog::CategoryId;
 
-use crate::error::{ApiError, extract_request_id};
+use crate::error::{ApiError, ErrorResponse, extract_request_id};
 use crate::state::AppState;
 
 /// HTTP representation of a category.
@@ -39,6 +39,7 @@ pub struct CategoryListResponse {
     path = "/api/v1/categories",
     responses(
         (status = 200, description = "The category list", body = CategoryListResponse),
+        (status = 500, description = "Internal storage failure", body = ErrorResponse),
     ),
 )]
 async fn list_categories(
@@ -57,16 +58,16 @@ async fn list_categories(
         .map_err(|err| ApiError::from(err).with_request_id(extract_request_id(&request)))
 }
 
-/// `GET /api/v1/categories/{id}`
+/// `GET /api/v1/categories/{category_id}`
 #[utoipa::path(
     get,
-    path = "/api/v1/categories/{id}",
+    path = "/api/v1/categories/{category_id}",
     params(
-        ("id" = String, Path, description = "Category identifier"),
+        ("category_id" = String, Path, description = "Category identifier"),
     ),
     responses(
         (status = 200, description = "The requested category", body = CategoryResponse),
-        (status = 404, description = "Category not found"),
+        (status = 404, description = "Category not found", body = ErrorResponse),
     ),
 )]
 async fn get_category(
@@ -86,5 +87,5 @@ async fn get_category(
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_categories))
-        .route("/{id}", get(get_category))
+        .route("/{category_id}", get(get_category))
 }

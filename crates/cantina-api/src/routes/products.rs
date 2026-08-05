@@ -10,7 +10,7 @@ use utoipa::ToSchema;
 use cantina_application::catalog::ListProductsQuery;
 use cantina_core::catalog::{CategoryId, ProductId};
 
-use crate::error::{ApiError, extract_request_id};
+use crate::error::{ApiError, ErrorResponse, extract_request_id};
 use crate::state::AppState;
 
 /// HTTP representation of a product.
@@ -69,7 +69,7 @@ pub struct ListProductsParams {
     ),
     responses(
         (status = 200, description = "The product list", body = ProductListResponse),
-        (status = 400, description = "Invalid query parameters"),
+        (status = 400, description = "Invalid query parameters", body = ErrorResponse),
     ),
 )]
 async fn list_products(
@@ -78,7 +78,10 @@ async fn list_products(
     request: Request,
 ) -> Result<Json<ProductListResponse>, ApiError> {
     let params = params
-        .map_err(|err| ApiError::invalid_query(err.body_text()))
+        .map_err(|err| {
+            tracing::debug!(detail = %err, "invalid catalog query rejected");
+            ApiError::invalid_query("the catalog query is invalid")
+        })
         .map_err(|err| err.with_request_id(extract_request_id(&request)))?;
     let Query(params) = params;
 
@@ -102,16 +105,16 @@ async fn list_products(
     }))
 }
 
-/// `GET /api/v1/products/{id}`
+/// `GET /api/v1/products/{product_id}`
 #[utoipa::path(
     get,
-    path = "/api/v1/products/{id}",
+    path = "/api/v1/products/{product_id}",
     params(
-        ("id" = String, Path, description = "Product identifier"),
+        ("product_id" = String, Path, description = "Product identifier"),
     ),
     responses(
         (status = 200, description = "The requested product", body = ProductResponse),
-        (status = 404, description = "Product not found"),
+        (status = 404, description = "Product not found", body = ErrorResponse),
     ),
 )]
 async fn get_product(
@@ -131,5 +134,5 @@ async fn get_product(
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_products))
-        .route("/{id}", get(get_product))
+        .route("/{product_id}", get(get_product))
 }

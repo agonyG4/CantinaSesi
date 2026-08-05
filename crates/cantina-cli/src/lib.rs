@@ -96,8 +96,8 @@ pub struct ProductsListArgs {
     pub search: Option<String>,
 
     /// Include unavailable products in the listing.
-    #[arg(long)]
-    pub include_unavailable: bool,
+    #[arg(long, visible_alias = "include-unavailable")]
+    pub all: bool,
 }
 
 /// Identifier accepted by `products show`.
@@ -167,7 +167,7 @@ pub async fn run(cli: Cli) -> Result<(), api::CliError> {
                 let query = api::ProductsQuery {
                     category_id: args.category_id,
                     search: args.search,
-                    include_unavailable: args.include_unavailable,
+                    include_unavailable: args.all,
                 };
                 commands::products::list(&api_url(cli.api_url.as_deref()), cli.format, &query).await
             }

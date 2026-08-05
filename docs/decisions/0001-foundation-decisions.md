@@ -38,6 +38,20 @@ Repository and service interfaces live in `cantina-application::ports` and
 are described in domain terms. Adapters in `cantina-infrastructure` implement
 them. The reverse is forbidden.
 
+```mermaid
+graph LR
+    CORE["cantina-core"]
+    APP["cantina-application"] --> CORE
+    INFRA["cantina-infrastructure"] --> APP
+    API["cantina-api"] --> APP
+    API --> INFRA
+    CLI["cantina-cli"] -. "HTTP" .-> API
+```
+
+`cantina-core` depends on no workspace crate. `cantina-api` composes the
+application with the infrastructure adapters; `cantina-cli` is an HTTP client
+of the running API only.
+
 ### No database yet
 
 The foundation ships in-memory repository adapters only, for startup, tests
