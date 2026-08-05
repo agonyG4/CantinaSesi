@@ -8,6 +8,7 @@
 //! Router construction is separated from process startup so the router can
 //! be tested directly.
 
+pub mod bootstrap;
 pub mod error;
 pub mod routes;
 pub mod state;
@@ -27,6 +28,10 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 pub fn build_router() -> Router<AppState> {
     Router::new()
         .route("/health", axum::routing::get(routes::health::health))
+        .route(
+            "/api/openapi.json",
+            axum::routing::get(routes::openapi::openapi_json),
+        )
         .nest("/api/v1", routes::api_v1())
 }
 

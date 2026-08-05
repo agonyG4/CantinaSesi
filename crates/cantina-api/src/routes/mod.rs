@@ -4,6 +4,7 @@ pub mod auth;
 pub mod canteen;
 pub mod categories;
 pub mod health;
+pub mod openapi;
 pub mod orders;
 pub mod products;
 pub mod users;

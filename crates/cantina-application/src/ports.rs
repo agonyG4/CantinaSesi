@@ -44,8 +44,12 @@ pub trait ProductRepository: Send + Sync {
     /// Finds a product by its identifier.
     async fn find_product_by_id(&self, id: &ProductId) -> Result<Option<Product>, RepositoryError>;
 
-    /// Lists the products that can currently be ordered.
-    async fn list_available_products(&self) -> Result<Vec<Product>, RepositoryError>;
+    /// Lists every known product regardless of availability.
+    ///
+    /// Availability filtering is an application rule owned by the use case,
+    /// not by the adapter, so the same data can feed both the public catalog
+    /// and the administrative views.
+    async fn list_products(&self) -> Result<Vec<Product>, RepositoryError>;
 }
 
 /// Repository for [`Category`] aggregates.
@@ -56,6 +60,9 @@ pub trait CategoryRepository: Send + Sync {
         &self,
         id: &CategoryId,
     ) -> Result<Option<Category>, RepositoryError>;
+
+    /// Lists every known category.
+    async fn list_categories(&self) -> Result<Vec<Category>, RepositoryError>;
 }
 
 /// Repository for [`Order`] aggregates.

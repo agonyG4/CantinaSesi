@@ -77,15 +77,8 @@ impl ProductRepository for MemProductRepository {
         Ok(self.products.lock().unwrap().get(id.as_str()).cloned())
     }
 
-    async fn list_available_products(&self) -> Result<Vec<Product>, RepositoryError> {
-        Ok(self
-            .products
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|product| product.is_available())
-            .cloned()
-            .collect())
+    async fn list_products(&self) -> Result<Vec<Product>, RepositoryError> {
+        Ok(self.products.lock().unwrap().values().cloned().collect())
     }
 }
 
@@ -114,6 +107,10 @@ impl CategoryRepository for MemCategoryRepository {
         id: &CategoryId,
     ) -> Result<Option<Category>, RepositoryError> {
         Ok(self.categories.lock().unwrap().get(id.as_str()).cloned())
+    }
+
+    async fn list_categories(&self) -> Result<Vec<Category>, RepositoryError> {
+        Ok(self.categories.lock().unwrap().values().cloned().collect())
     }
 }
 

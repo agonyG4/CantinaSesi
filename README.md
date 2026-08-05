@@ -18,6 +18,7 @@ crates/
 ├── cantina-api/           HTTP adapter (Axum) and composition root
 └── cantina-cli/           Administrative HTTP client (Clap + Reqwest)
 docs/
+├── api/catalog.md
 ├── architecture/backend.md
 └── decisions/
 ```
@@ -28,10 +29,16 @@ docs/
 cargo build --workspace
 cargo run -p cantina-api
 cargo run -p cantina-cli -- health
+cargo run -p cantina-cli -- products list
+cargo run -p cantina-cli -- products show product_coxinha
+cargo run -p cantina-cli -- categories list
 cargo test --workspace
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+The read-only catalog endpoints are described in `docs/api/catalog.md` and in
+the OpenAPI document served by the API at `GET /api/openapi.json`.
 
 ## How the pieces fit together
 

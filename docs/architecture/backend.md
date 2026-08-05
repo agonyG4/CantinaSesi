@@ -111,15 +111,27 @@ PickupCodeGenerator
 ```
 
 Ports are described in domain terms (`find_user_by_email`, `save_order`,
-`list_active_canteen_orders`) — never in SQL terms (`execute_query`,
+`list_products`, `list_categories`) — never in SQL terms (`execute_query`,
 `insert_record`). The future database implementation adapts to these
 interfaces; the application never adapts to the database.
 
 `cantina-infrastructure` provides concrete adapters (`InMemory*Repository`,
 `SystemClock`, `Generator`, `DefaultPickupCodeGenerator`) that implement those
 ports. Replacing the in-memory repositories with a real database later is a
-change confined to `cantina-infrastructure` and the composition root in
-`cantina-api`.
+change confined to `cantina-infrastructure` and the composition root
+(`cantina-api::bootstrap`).
+
+## The HTTP contract
+
+The API is versioned under `/api/v1` and described by an OpenAPI 3.1 document
+served at `GET /api/openapi.json`. That document is the single source of truth
+for the wire format: HTTP DTOs, never domain models or storage shapes. The
+read-only catalog slice is documented by hand in `docs/api/catalog.md`.
+
+List endpoints return `{"items": [...]}` envelopes, and every non-success
+response uses a single `{"error": {code, message, request_id}}` envelope with
+stable machine-readable codes. Invalid query strings answer `400` with the
+`INVALID_QUERY` code.
 
 ## The web-to-API flow
 
@@ -220,7 +232,7 @@ of those adapters.
 * `cantina-infrastructure` grows a real database adapter and SQL migrations:
   split persistence into its own crate (for example
   `cantina-persistence-postgres`) if the base crate becomes a dependency hub.
-* `cantina-api` grows OpenAPI, pagination, rate limiting or event streaming
+* `cantina-api` grows pagination, rate limiting or event streaming
   middleware: consider splitting shared HTTP helpers into a dedicated crate.
 * `cantina-application` starts aggregating many unrelated use cases: split by
   bounded context (`catalog`, `orders`, `users`) rather than by technology.

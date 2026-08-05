@@ -7,13 +7,13 @@ use serde_json::Value;
 use tower::util::ServiceExt;
 
 use cantina_api::app;
-use cantina_api::state::AppState;
+use cantina_api::bootstrap;
 use cantina_infrastructure::config::Config;
 use cantina_infrastructure::persistence::InMemoryRepositories;
 
 async fn router() -> axum::Router<()> {
-    let repositories = InMemoryRepositories::with_seed_data();
-    let state = AppState::new(repositories);
+    let repositories = InMemoryRepositories::with_seed_data().expect("seed repositories");
+    let state = bootstrap::build_state(repositories);
     app(state, &Config::development())
 }
 
@@ -105,14 +105,105 @@ async fn seeded_category_is_returned() {
 }
 
 #[tokio::test]
-async fn versioned_resources_are_mounted() {
+async fn empty_prepared_routers_answer_not_found() {
     let (status, _, _) = raw_get("/api/v1/auth").await;
-    assert_eq!(
-        status,
-        StatusCode::NOT_FOUND,
-        "empty prepared routers answer 404"
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = raw_get("/api/v1/users").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
 
-    let (status, _, _) = raw_get("/api/v1/products").await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "no collection route yet");
+#[tokio::test]
+async fn product_list_returns_only_available_products() {
+    let (status, _, json) = get("/api/v1/products").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 4, "seed has 4 available products");
+    for item in items {
+        assert_eq!(item["available"], true);
+    }
+}
+
+#[tokio::test]
+async fn product_list_can_include_unavailable_products() {
+    let (status, _, json) = get("/api/v1/products?include_unavailable=true").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 5, "seed has 5 products in total");
+    assert!(items.iter().any(|item| item["available"] == false));
+}
+
+#[tokio::test]
+async fn product_list_filters_by_category() {
+    let (status, _, json) = get("/api/v1/products?category_id=category_drinks").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], "product_refresco");
+}
+
+#[tokio::test]
+async fn product_list_searches_by_name() {
+    let (status, _, json) = get("/api/v1/products?search=coxinha").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], "product_coxinha");
+}
+
+#[tokio::test]
+async fn product_list_is_sorted_by_name() {
+    let (status, _, json) = get("/api/v1/products?include_unavailable=true").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    let names: Vec<&str> = items
+        .iter()
+        .map(|item| item["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "Brigadeiro",
+            "Coxinha",
+            "Pastel de queijo",
+            "Pão de queijo",
+            "Refresco de limão"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn invalid_product_query_returns_invalid_query_error() {
+    let (status, _, json) = get("/api/v1/products?include_unavailable=not-a-bool").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["code"], "INVALID_QUERY");
+}
+
+#[tokio::test]
+async fn category_list_returns_envelope() {
+    let (status, _, json) = get("/api/v1/categories").await;
+    assert_eq!(status, StatusCode::OK);
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3, "seed has 3 categories");
+    let names: Vec<&str> = items
+        .iter()
+        .map(|item| item["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["Drinks", "Padaria", "Snacks"]);
+}
+
+#[tokio::test]
+async fn openapi_document_is_served_as_json() {
+    let (status, headers, json) = get("/api/openapi.json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers["content-type"], "application/json",
+        "OpenAPI must use JSON content type"
+    );
+    assert_eq!(json["openapi"], "3.1.0");
+    assert_eq!(json["info"]["title"], "CantinaSesi API");
+    let paths = json["paths"].as_object().unwrap();
+    assert!(paths.contains_key("/api/v1/products"));
+    assert!(paths.contains_key("/api/v1/products/{id}"));
+    assert!(paths.contains_key("/api/v1/categories"));
+    assert!(paths.contains_key("/api/v1/categories/{id}"));
 }

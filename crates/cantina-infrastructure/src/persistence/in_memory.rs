@@ -96,12 +96,8 @@ impl ProductRepository for InMemoryProductRepository {
         Ok(lock_store(&self.products)?.get(id.as_str()).cloned())
     }
 
-    async fn list_available_products(&self) -> Result<Vec<Product>, RepositoryError> {
-        Ok(lock_store(&self.products)?
-            .values()
-            .filter(|product| product.is_available())
-            .cloned()
-            .collect())
+    async fn list_products(&self) -> Result<Vec<Product>, RepositoryError> {
+        Ok(lock_store(&self.products)?.values().cloned().collect())
     }
 }
 
@@ -138,6 +134,10 @@ impl CategoryRepository for InMemoryCategoryRepository {
         id: &CategoryId,
     ) -> Result<Option<Category>, RepositoryError> {
         Ok(lock_store(&self.categories)?.get(id.as_str()).cloned())
+    }
+
+    async fn list_categories(&self) -> Result<Vec<Category>, RepositoryError> {
+        Ok(lock_store(&self.categories)?.values().cloned().collect())
     }
 }
 
@@ -218,51 +218,76 @@ impl InMemoryRepositories {
         }
     }
 
-    /// Creates repositories pre-loaded with a small demonstration catalog.
-    pub fn with_seed_data() -> Self {
+    /// Creates repositories pre-loaded with a demonstration catalog covering
+    /// several categories, available products and one unavailable product so
+    /// catalog filtering can be exercised.
+    pub fn with_seed_data() -> Result<Self, RepositoryError> {
         let repos = Self::new();
 
         repos
             .categories
-            .insert(Category::new(CategoryId::new("category_snacks"), "Snacks"))
-            .expect("seed category");
-
+            .insert(Category::new(CategoryId::new("category_snacks"), "Snacks"))?;
         repos
-            .products
-            .insert(Product::new(
-                ProductId::new("product_brigadeiro"),
-                "Brigadeiro",
-                "Chocolate truffle, school classic",
-                500,
-                CategoryId::new("category_snacks"),
-                true,
-            ))
-            .expect("seed product");
-
+            .categories
+            .insert(Category::new(CategoryId::new("category_drinks"), "Drinks"))?;
         repos
-            .products
-            .insert(Product::new(
-                ProductId::new("product_coxinha"),
-                "Coxinha",
-                "Fried shredded-chicken pastry",
-                750,
-                CategoryId::new("category_snacks"),
-                true,
-            ))
-            .expect("seed product");
+            .categories
+            .insert(Category::new(CategoryId::new("category_bakery"), "Padaria"))?;
 
-        repos
-            .users
-            .insert(User::new(
-                UserId::new("user_student_1"),
-                "Ana Souza",
-                "ana@example.com",
-                UserRole::Student,
-                UserStatus::Active,
-            ))
-            .expect("seed user");
+        repos.products.insert(Product::new(
+            ProductId::new("product_brigadeiro"),
+            "Brigadeiro",
+            "Chocolate truffle, school classic",
+            500,
+            CategoryId::new("category_snacks"),
+            true,
+        ))?;
 
-        repos
+        repos.products.insert(Product::new(
+            ProductId::new("product_coxinha"),
+            "Coxinha",
+            "Fried shredded-chicken pastry",
+            750,
+            CategoryId::new("category_snacks"),
+            true,
+        ))?;
+
+        repos.products.insert(Product::new(
+            ProductId::new("product_refresco"),
+            "Refresco de limão",
+            "Fresh lemonade",
+            300,
+            CategoryId::new("category_drinks"),
+            true,
+        ))?;
+
+        repos.products.insert(Product::new(
+            ProductId::new("product_pao_de_queijo"),
+            "Pão de queijo",
+            "Baked cheese bread",
+            350,
+            CategoryId::new("category_bakery"),
+            true,
+        ))?;
+
+        repos.products.insert(Product::new(
+            ProductId::new("product_pastel"),
+            "Pastel de queijo",
+            "Cheese pastry, temporarily unavailable",
+            600,
+            CategoryId::new("category_snacks"),
+            false,
+        ))?;
+
+        repos.users.insert(User::new(
+            UserId::new("user_student_1"),
+            "Ana Souza",
+            "ana@example.com",
+            UserRole::Student,
+            UserStatus::Active,
+        ))?;
+
+        Ok(repos)
     }
 }
 
@@ -274,6 +299,7 @@ impl Default for InMemoryRepositories {
 
 #[cfg(test)]
 mod tests {
+    use cantina_application::ports::{CategoryRepository, ProductRepository};
     use cantina_core::catalog::{Category, CategoryId, Product, ProductId};
     use cantina_core::users::{User, UserId, UserRole, UserStatus};
 
@@ -281,7 +307,7 @@ mod tests {
 
     #[test]
     fn seeded_repositories_expose_demo_data() {
-        let repos = InMemoryRepositories::with_seed_data();
+        let repos = InMemoryRepositories::with_seed_data().expect("seed repositories");
         assert!(
             repos
                 .products
@@ -313,5 +339,31 @@ mod tests {
                 ))
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn seed_data_covers_available_and_unavailable_products() {
+        let repos = InMemoryRepositories::with_seed_data().expect("seed repositories");
+        let (mut available, mut unavailable) = (0u32, 0u32);
+        for product in repos.products.list_products().await.expect("list products") {
+            if product.is_available() {
+                available += 1;
+            } else {
+                unavailable += 1;
+            }
+        }
+        assert!(available >= 3, "expected at least 3 available products");
+        assert!(unavailable >= 1, "expected at least 1 unavailable product");
+    }
+
+    #[tokio::test]
+    async fn seed_categories_cover_at_least_two_entries() {
+        let repos = InMemoryRepositories::with_seed_data().expect("seed repositories");
+        let categories = repos
+            .categories
+            .list_categories()
+            .await
+            .expect("list categories");
+        assert!(categories.len() >= 2);
     }
 }

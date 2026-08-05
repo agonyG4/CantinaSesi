@@ -2,7 +2,8 @@
 //! serves it with graceful shutdown.
 
 use anyhow::Context;
-use cantina_api::{app, state::AppState};
+use cantina_api::app;
+use cantina_api::bootstrap;
 use cantina_infrastructure::config::Config;
 use cantina_infrastructure::persistence::InMemoryRepositories;
 use tokio::net::TcpListener;
@@ -12,8 +13,9 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     let config = Config::from_env();
-    let repositories = InMemoryRepositories::with_seed_data();
-    let state = AppState::new(repositories);
+    let repositories =
+        InMemoryRepositories::with_seed_data().context("failed to seed repositories")?;
+    let state = bootstrap::build_state(repositories);
     let router = app(state, &config);
 
     let address = config.bind_address().to_string();

@@ -5,14 +5,13 @@ use crate::output::{OutputFormat, render};
 
 /// Executes the `health` command against the given API base URL.
 pub async fn run(api_url: &str, format: OutputFormat) -> Result<(), CliError> {
-    let client = ApiClient::new(api_url.to_string());
+    let client = ApiClient::new(api_url)?;
     let health = client.health().await?;
-    print_health(&health, format);
-    Ok(())
+    print_health(&health, format)
 }
 
 /// Prints a [`HealthResponse`] in the requested format.
-pub fn print_health(health: &HealthResponse, format: OutputFormat) {
+pub fn print_health(health: &HealthResponse, format: OutputFormat) -> Result<(), CliError> {
     let rendered = render(
         health,
         || {
@@ -22,6 +21,7 @@ pub fn print_health(health: &HealthResponse, format: OutputFormat) {
             )
         },
         format,
-    );
+    )?;
     println!("{rendered}");
+    Ok(())
 }

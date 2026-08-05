@@ -4,6 +4,7 @@ use axum::extract::{Path, Request, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use cantina_core::catalog::CategoryId;
 
@@ -11,7 +12,7 @@ use crate::error::{ApiError, extract_request_id};
 use crate::state::AppState;
 
 /// HTTP representation of a category.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct CategoryResponse {
     id: String,
     name: String,
@@ -26,7 +27,48 @@ impl From<cantina_application::catalog::CategoryDto> for CategoryResponse {
     }
 }
 
+/// Envelope for category collection responses.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CategoryListResponse {
+    items: Vec<CategoryResponse>,
+}
+
+/// `GET /api/v1/categories`
+#[utoipa::path(
+    get,
+    path = "/api/v1/categories",
+    responses(
+        (status = 200, description = "The category list", body = CategoryListResponse),
+    ),
+)]
+async fn list_categories(
+    State(state): State<AppState>,
+    request: Request,
+) -> Result<Json<CategoryListResponse>, ApiError> {
+    state
+        .catalog
+        .list_categories()
+        .await
+        .map(|categories| {
+            Json(CategoryListResponse {
+                items: categories.into_iter().map(Into::into).collect(),
+            })
+        })
+        .map_err(|err| ApiError::from(err).with_request_id(extract_request_id(&request)))
+}
+
 /// `GET /api/v1/categories/{id}`
+#[utoipa::path(
+    get,
+    path = "/api/v1/categories/{id}",
+    params(
+        ("id" = String, Path, description = "Category identifier"),
+    ),
+    responses(
+        (status = 200, description = "The requested category", body = CategoryResponse),
+        (status = 404, description = "Category not found"),
+    ),
+)]
 async fn get_category(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -42,5 +84,7 @@ async fn get_category(
 
 /// Prepares the categories router.
 pub fn router() -> Router<AppState> {
-    Router::new().route("/{id}", get(get_category))
+    Router::new()
+        .route("/", get(list_categories))
+        .route("/{id}", get(get_category))
 }

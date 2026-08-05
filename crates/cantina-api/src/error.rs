@@ -41,6 +41,18 @@ impl ApiError {
         self.body.request_id = request_id;
         self
     }
+
+    /// Builds a client error for an invalid query string.
+    pub fn invalid_query(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            body: ErrorBody {
+                code: "INVALID_QUERY",
+                message: message.into(),
+                request_id: None,
+            },
+        }
+    }
 }
 
 impl From<ApplicationError> for ApiError {

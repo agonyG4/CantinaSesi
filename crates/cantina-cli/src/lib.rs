@@ -32,13 +32,14 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// Command tree. Only `health` and `version` are implemented; the rest is
-/// prepared for future administrative tasks.
+/// Command tree. `health`, `version`, `products` and `categories` are
+/// implemented; the rest is prepared for future administrative tasks.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Auth(AuthCmd),
     Users(UsersCmd),
     Products(ProductsCmd),
+    Categories(CategoriesCmd),
     Orders(OrdersCmd),
     Health,
     Version,
@@ -76,10 +77,45 @@ pub struct ProductsCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum ProductsSub {
-    List,
+    List(ProductsListArgs),
+    Show(ProductShowArgs),
     Create,
     Update,
     Disable,
+}
+
+/// Filters accepted by `products list`.
+#[derive(Debug, Args)]
+pub struct ProductsListArgs {
+    /// Restrict the results to a single category.
+    #[arg(long)]
+    pub category_id: Option<String>,
+
+    /// Case-insensitive substring match against the name or description.
+    #[arg(long)]
+    pub search: Option<String>,
+
+    /// Include unavailable products in the listing.
+    #[arg(long)]
+    pub include_unavailable: bool,
+}
+
+/// Identifier accepted by `products show`.
+#[derive(Debug, Args)]
+pub struct ProductShowArgs {
+    /// Product identifier.
+    pub id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CategoriesCmd {
+    #[command(subcommand)]
+    pub sub: CategoriesSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CategoriesSub {
+    List,
 }
 
 #[derive(Debug, Args)]
@@ -111,25 +147,51 @@ pub fn resolve_api_url(cli_value: Option<&str>, env_value: Option<&str>) -> Stri
         .to_string()
 }
 
+/// Resolves the API base URL from the CLI flag and environment.
+fn api_url(cli_value: Option<&str>) -> String {
+    resolve_api_url(cli_value, std::env::var("CANTINA_API_URL").ok().as_deref())
+}
+
 /// Executes the given command.
 pub async fn run(cli: Cli) -> Result<(), api::CliError> {
     match cli.command {
         Command::Health => {
-            let api_url = resolve_api_url(
-                cli.api_url.as_deref(),
-                std::env::var("CANTINA_API_URL").ok().as_deref(),
-            );
-            commands::health::run(&api_url, cli.format).await
+            commands::health::run(&api_url(cli.api_url.as_deref()), cli.format).await
         }
         Command::Version => {
             commands::version::run();
             Ok(())
         }
+        Command::Products(cmd) => match cmd.sub {
+            ProductsSub::List(args) => {
+                let query = api::ProductsQuery {
+                    category_id: args.category_id,
+                    search: args.search,
+                    include_unavailable: args.include_unavailable,
+                };
+                commands::products::list(&api_url(cli.api_url.as_deref()), cli.format, &query).await
+            }
+            ProductsSub::Show(args) => {
+                commands::products::show(&api_url(cli.api_url.as_deref()), cli.format, &args.id)
+                    .await
+            }
+            ProductsSub::Create => Err(api::CliError::NotImplemented {
+                command: "products create",
+            }),
+            ProductsSub::Update => Err(api::CliError::NotImplemented {
+                command: "products update",
+            }),
+            ProductsSub::Disable => Err(api::CliError::NotImplemented {
+                command: "products disable",
+            }),
+        },
+        Command::Categories(cmd) => match cmd.sub {
+            CategoriesSub::List => {
+                commands::categories::list(&api_url(cli.api_url.as_deref()), cli.format).await
+            }
+        },
         Command::Auth(_) => Err(api::CliError::NotImplemented { command: "auth" }),
         Command::Users(_) => Err(api::CliError::NotImplemented { command: "users" }),
-        Command::Products(_) => Err(api::CliError::NotImplemented {
-            command: "products",
-        }),
         Command::Orders(_) => Err(api::CliError::NotImplemented { command: "orders" }),
     }
 }

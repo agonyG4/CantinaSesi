@@ -51,6 +51,36 @@ Passwords, JWT and sessions are out of scope. The domain exposes
 `TokenIssuer` and an `AuthenticateUser` contract that returns a typed
 "not implemented" error.
 
+### HTTP contract is versioned and OpenAPI-described
+
+The API lives under `/api/v1` and ships a machine-readable OpenAPI 3.1
+document at `GET /api/openapi.json`. The document describes HTTP DTOs — never
+domain models or storage shapes. No interactive UI is served.
+
+### Collection responses use an envelope
+
+List endpoints return `{"items": [...]}`. This leaves room to add pagination
+metadata later without breaking clients that read `items`.
+
+### Availability filtering is an application rule
+
+`ProductRepository::list_products` returns every known product regardless of
+availability; the `ListProducts` use case applies the availability filter
+unless `include_unavailable` is requested. Adapters stay neutral so the same
+data feeds both the public catalog and future administrative views.
+
+### Invalid query strings are typed errors
+
+A query the API cannot parse is answered with `400` and the standardized
+`INVALID_QUERY` error code, not with a framework default body, so clients can
+branch on the error code.
+
+### The first vertical slice is read-only
+
+Catalog V1 exposes products and categories for reading only. This forces the
+read path (route → use case → port → adapter) to be built end-to-end before
+any mutation exists, keeping the slice small and reviewable.
+
 ## Consequences
 
 - Replacing the UI requires no domain or application changes.

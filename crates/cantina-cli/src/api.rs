@@ -1,8 +1,17 @@
 //! HTTP client used by the CLI against the running cantina-api.
+//!
+//! The client is deliberately thin: it performs requests against a single
+//! base URL and converts both network failures and API error responses into
+//! typed [`CliError`] values so commands can render them consistently.
 
 use reqwest::StatusCode;
+use reqwest::Url;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Request timeout for every API call.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Health payload returned by `GET /api/v1/health`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,10 +21,83 @@ pub struct HealthResponse {
     pub version: String,
 }
 
+/// HTTP representation of a product, mirroring the API DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductDto {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// Price in minor units.
+    pub price: u64,
+    pub category_id: String,
+    pub available: bool,
+}
+
+/// Envelope for product collection responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductListResponse {
+    pub items: Vec<ProductDto>,
+}
+
+/// HTTP representation of a category, mirroring the API DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CategoryDto {
+    pub id: String,
+    pub name: String,
+}
+
+/// Envelope for category collection responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CategoryListResponse {
+    pub items: Vec<CategoryDto>,
+}
+
+/// Query filters sent to `GET /api/v1/products`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProductsQuery {
+    pub category_id: Option<String>,
+    pub search: Option<String>,
+    pub include_unavailable: bool,
+}
+
+impl ProductsQuery {
+    fn pairs(&self) -> Vec<(&'static str, String)> {
+        let mut pairs = Vec::new();
+        if let Some(category_id) = &self.category_id {
+            pairs.push(("category_id", category_id.clone()));
+        }
+        if let Some(search) = &self.search {
+            pairs.push(("search", search.clone()));
+        }
+        if self.include_unavailable {
+            pairs.push(("include_unavailable", "true".to_string()));
+        }
+        pairs
+    }
+}
+
+/// Error envelope returned by the API on non-success responses.
+#[derive(Debug, Deserialize)]
+struct ApiErrorEnvelope {
+    error: ApiErrorBody,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiErrorBody {
+    code: String,
+    message: String,
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
 /// Error surfaced by the CLI.
 #[derive(Debug, Error)]
 pub enum CliError {
-    /// The API could not be reached (DNS, connection refused, timeout).
+    /// The configured base URL is not a valid HTTP(S) URL.
+    #[error("invalid API URL '{url}': {message}")]
+    InvalidApiUrl { url: String, message: String },
+
+    /// The API could not be reached (DNS, connection refused, TLS).
     #[error("unable to reach the API at {url}: {source}")]
     Transport {
         url: String,
@@ -23,55 +105,172 @@ pub enum CliError {
         source: reqwest::Error,
     },
 
-    /// The API responded with an unparseable body.
+    /// The request exceeded the configured timeout.
+    #[error("the API at {url} did not respond within {timeout} seconds")]
+    Timeout { url: String, timeout: u64 },
+
+    /// The API responded with a structured error.
+    #[error("the API returned HTTP {status}: {message}")]
+    ApiErrorResponse {
+        status: u16,
+        code: String,
+        message: String,
+        request_id: Option<String>,
+    },
+
+    /// The API returned a successful status but an unparseable body.
     #[error("invalid response from the API: {source}")]
     ResponseDecode {
         #[source]
-        source: reqwest::Error,
+        source: serde_json::Error,
     },
 
-    /// The API responded with an error status.
-    #[error("the API returned an error status: HTTP {status}")]
-    Api { status: u16 },
+    /// The API returned a successful status without any content.
+    #[error("the API returned HTTP {status} without a response body")]
+    MalformedSuccess { status: u16 },
+
+    /// A payload could not be rendered in the requested output format.
+    #[error("failed to render output: {source}")]
+    OutputSerialization {
+        #[source]
+        source: serde_json::Error,
+    },
 
     /// A command that has not been implemented yet.
     #[error("command not implemented yet: {command}")]
     NotImplemented { command: &'static str },
 }
 
-/// Minimal HTTP client bound to one API base URL.
+/// HTTP client bound to one API base URL.
 pub struct ApiClient {
-    base_url: String,
+    base_url: Url,
+    client: reqwest::Client,
 }
 
 impl ApiClient {
-    /// Creates a client for the given base URL.
-    pub fn new(base_url: String) -> Self {
-        Self { base_url }
+    /// Creates a client for the given base URL, failing on invalid URLs.
+    pub fn new(base_url: &str) -> Result<Self, CliError> {
+        let parsed = Url::parse(base_url).map_err(|err| CliError::InvalidApiUrl {
+            url: base_url.to_string(),
+            message: err.to_string(),
+        })?;
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|source| CliError::Transport {
+                url: base_url.to_string(),
+                source,
+            })?;
+        Ok(Self {
+            base_url: parsed,
+            client,
+        })
     }
 
     /// Calls `GET /api/v1/health`.
     pub async fn health(&self) -> Result<HealthResponse, CliError> {
-        let url = format!("{}/api/v1/health", self.base_url);
-        let response = reqwest::get(&url)
-            .await
-            .map_err(|source| CliError::Transport {
-                url: url.clone(),
-                source,
+        self.get_json("/api/v1/health", &[]).await
+    }
+
+    /// Calls `GET /api/v1/products` with the given filters.
+    pub async fn list_products(
+        &self,
+        query: &ProductsQuery,
+    ) -> Result<ProductListResponse, CliError> {
+        self.get_json("/api/v1/products", &query.pairs()).await
+    }
+
+    /// Calls `GET /api/v1/products/{id}`.
+    pub async fn get_product(&self, id: &str) -> Result<ProductDto, CliError> {
+        self.get_json(&format!("/api/v1/products/{id}"), &[]).await
+    }
+
+    /// Calls `GET /api/v1/categories`.
+    pub async fn list_categories(&self) -> Result<CategoryListResponse, CliError> {
+        self.get_json("/api/v1/categories", &[]).await
+    }
+
+    /// Performs a GET request, joins the path onto the base URL and decodes
+    /// the response into `T`, translating API errors into [`CliError`].
+    async fn get_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<T, CliError> {
+        let mut url = self
+            .base_url
+            .join(path)
+            .map_err(|err| CliError::InvalidApiUrl {
+                url: self.base_url.to_string(),
+                message: err.to_string(),
             })?;
+        if !query.is_empty() {
+            let mut pairs = url.query_pairs_mut();
+            for (key, value) in query {
+                pairs.append_pair(key, value);
+            }
+            drop(pairs);
+        }
+        let url_string = url.to_string();
+
+        let response = self.client.get(url).send().await.map_err(|source| {
+            if source.is_timeout() {
+                CliError::Timeout {
+                    url: url_string.clone(),
+                    timeout: REQUEST_TIMEOUT.as_secs(),
+                }
+            } else {
+                CliError::Transport {
+                    url: url_string.clone(),
+                    source,
+                }
+            }
+        })?;
 
         let status = response.status();
-        let body: HealthResponse = response
-            .json()
-            .await
-            .map_err(|source| CliError::ResponseDecode { source })?;
+        if !status.is_success() {
+            return Err(self.error_from_response(status, response).await);
+        }
 
-        if status == StatusCode::OK {
-            Ok(body)
-        } else {
-            Err(CliError::Api {
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|source| CliError::Transport {
+                url: url_string,
+                source,
+            })?;
+        if bytes.is_empty() {
+            return Err(CliError::MalformedSuccess {
                 status: status.as_u16(),
-            })
+            });
+        }
+        serde_json::from_slice(&bytes).map_err(|source| CliError::ResponseDecode { source })
+    }
+
+    async fn error_from_response(
+        &self,
+        status: StatusCode,
+        response: reqwest::Response,
+    ) -> CliError {
+        let status_code = status.as_u16();
+        let bytes = response.bytes().await.unwrap_or_default();
+        if let Ok(envelope) = serde_json::from_slice::<ApiErrorEnvelope>(&bytes) {
+            CliError::ApiErrorResponse {
+                status: status_code,
+                code: envelope.error.code,
+                message: envelope.error.message,
+                request_id: envelope.error.request_id,
+            }
+        } else {
+            CliError::ApiErrorResponse {
+                status: status_code,
+                code: "UNKNOWN".to_string(),
+                message: status
+                    .canonical_reason()
+                    .unwrap_or("the API returned an error")
+                    .to_string(),
+                request_id: None,
+            }
         }
     }
 }

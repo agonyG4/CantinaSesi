@@ -1,13 +1,15 @@
 //! Application state: composed services injected into every handler.
+//!
+//! The state only holds already-composed services. How those services are
+//! built (which repositories and generators back them) is decided by the
+//! composition root in [`crate::bootstrap`], keeping this module free of any
+//! infrastructure dependency.
 
 use std::sync::Arc;
 
 use cantina_application::auth::AuthService;
 use cantina_application::catalog::CatalogService;
 use cantina_application::orders::OrderService;
-use cantina_infrastructure::identifiers::{DefaultPickupCodeGenerator, Generator};
-use cantina_infrastructure::persistence::InMemoryRepositories;
-use cantina_infrastructure::time::SystemClock;
 
 /// Immutable application state shared by all requests.
 #[derive(Clone)]
@@ -18,26 +20,16 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Composes the application services on top of the given repositories.
-    pub fn new(repositories: InMemoryRepositories) -> Self {
-        let ids: Arc<dyn cantina_application::ports::IdGenerator> = Arc::new(Generator::new());
-        let pickup_codes: Arc<dyn cantina_application::ports::PickupCodeGenerator> =
-            Arc::new(DefaultPickupCodeGenerator::new());
-        let clock: Arc<dyn cantina_application::ports::Clock> = Arc::new(SystemClock);
-
+    /// Creates the state from already-composed services.
+    pub fn new(
+        catalog: Arc<CatalogService>,
+        orders: Arc<OrderService>,
+        auth: Arc<AuthService>,
+    ) -> Self {
         Self {
-            catalog: Arc::new(CatalogService::new(
-                repositories.products.clone(),
-                repositories.categories.clone(),
-            )),
-            orders: Arc::new(OrderService::new(
-                repositories.orders.clone(),
-                repositories.products.clone(),
-                ids,
-                pickup_codes,
-                clock,
-            )),
-            auth: Arc::new(AuthService::new(repositories.users.clone())),
+            catalog,
+            orders,
+            auth,
         }
     }
 }
