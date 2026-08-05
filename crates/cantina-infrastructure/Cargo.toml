@@ -1,0 +1,12 @@
+[package]
+name = "cantina-infrastructure"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cantina-core = { path = "../cantina-core" }
+cantina-application = { path = "../cantina-application" }
+async-trait.workspace = true
