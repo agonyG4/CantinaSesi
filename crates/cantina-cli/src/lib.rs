@@ -24,6 +24,13 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub api_url: Option<String>,
 
+    /// Access token for authenticated commands.
+    ///
+    /// Takes precedence over `CANTINA_ACCESS_TOKEN`. The value is held in
+    /// memory only and never persisted.
+    #[arg(long, global = true)]
+    pub token: Option<String>,
+
     /// Output format.
     #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Human)]
     pub format: OutputFormat,
@@ -53,8 +60,29 @@ pub struct AuthCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum AuthSub {
-    Login,
+    /// Authenticate and print a new access token.
+    Login(AuthLoginArgs),
+    /// Print the authenticated user.
+    Me,
+    /// Issue a new session from the current access token.
+    Refresh,
+    /// Revoke the current session.
     Logout,
+}
+
+/// Arguments accepted by `auth login`.
+#[derive(Debug, Args)]
+pub struct AuthLoginArgs {
+    /// E-mail address of the account.
+    #[arg(long)]
+    pub email: String,
+
+    /// Read the password from standard input instead of prompting.
+    ///
+    /// Reads exactly one line, strips the trailing line ending and fails on
+    /// an empty line. The value is never echoed.
+    #[arg(long)]
+    pub password_stdin: bool,
 }
 
 #[derive(Debug, Args)]
@@ -152,6 +180,21 @@ fn api_url(cli_value: Option<&str>) -> String {
     resolve_api_url(cli_value, std::env::var("CANTINA_API_URL").ok().as_deref())
 }
 
+/// Resolves the access token from the CLI flag and environment.
+///
+/// Precedence: explicit `--token`, then `CANTINA_ACCESS_TOKEN`. The token is
+/// held in memory only and never persisted.
+fn access_token(cli_value: Option<&str>) -> Result<secrecy::SecretString, api::CliError> {
+    match cli_value {
+        Some(value) if !value.is_empty() => Ok(secrecy::SecretString::from(value.to_string())),
+        Some(_) => Err(api::CliError::MissingAccessToken),
+        None => match std::env::var("CANTINA_ACCESS_TOKEN") {
+            Ok(value) if !value.is_empty() => Ok(secrecy::SecretString::from(value)),
+            _ => Err(api::CliError::MissingAccessToken),
+        },
+    }
+}
+
 /// Executes the given command.
 pub async fn run(cli: Cli) -> Result<(), api::CliError> {
     match cli.command {
@@ -190,7 +233,34 @@ pub async fn run(cli: Cli) -> Result<(), api::CliError> {
                 commands::categories::list(&api_url(cli.api_url.as_deref()), cli.format).await
             }
         },
-        Command::Auth(_) => Err(api::CliError::NotImplemented { command: "auth" }),
+        Command::Auth(cmd) => match cmd.sub {
+            AuthSub::Login(args) => {
+                commands::auth::login(
+                    &api_url(cli.api_url.as_deref()),
+                    cli.format,
+                    &args.email,
+                    args.password_stdin,
+                )
+                .await
+            }
+            AuthSub::Me => {
+                let token = access_token(cli.token.as_deref())?;
+                commands::auth::me(&api_url(cli.api_url.as_deref()), cli.format, &token).await
+            }
+            AuthSub::Refresh => {
+                let token = access_token(cli.token.as_deref())?;
+                commands::auth::refresh(
+                    &api_url(cli.api_url.as_deref()),
+                    cli.format,
+                    &token,
+                )
+                .await
+            }
+            AuthSub::Logout => {
+                let token = access_token(cli.token.as_deref())?;
+                commands::auth::logout(&api_url(cli.api_url.as_deref()), &token).await
+            }
+        },
         Command::Users(_) => Err(api::CliError::NotImplemented { command: "users" }),
         Command::Orders(_) => Err(api::CliError::NotImplemented { command: "orders" }),
     }

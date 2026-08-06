@@ -6,16 +6,21 @@
 #![cfg(test)]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
+use secrecy::{ExposeSecret, SecretString};
 
 use cantina_core::catalog::{Category, CategoryId, Product, ProductId};
 use cantina_core::orders::{Order, OrderId};
 use cantina_core::users::{User, UserId};
 
 use crate::ports::{
-    CategoryRepository, OrderRepository, ProductRepository, RepositoryError, UserRepository,
+    CategoryRepository, Clock, CredentialRepository, OrderRepository, PasswordError,
+    PasswordService, ProductRepository, RepositoryError, SessionRecord, SessionRepository,
+    SessionTokenService, StoredPasswordHash, TokenError, UserRepository,
 };
 
 #[derive(Default)]
@@ -166,5 +171,246 @@ impl OrderRepository for MemOrderRepository {
             .filter(|order| order.status().is_active())
             .cloned()
             .collect())
+    }
+}
+
+/// In-memory credential repository for application tests.
+#[derive(Default)]
+pub struct MemCredentialRepository {
+    hashes: Mutex<HashMap<String, StoredPasswordHash>>,
+}
+
+impl MemCredentialRepository {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&self, user_id: &UserId, hash: StoredPasswordHash) {
+        self.hashes
+            .lock()
+            .unwrap()
+            .insert(user_id.as_str().to_string(), hash);
+    }
+}
+
+#[async_trait]
+impl CredentialRepository for MemCredentialRepository {
+    async fn find_password_hash_by_user_id(
+        &self,
+        user_id: &UserId,
+    ) -> Result<Option<StoredPasswordHash>, RepositoryError> {
+        Ok(self.hashes.lock().unwrap().get(user_id.as_str()).cloned())
+    }
+}
+
+/// In-memory session repository for application tests.
+#[derive(Default)]
+pub struct MemSessionRepository {
+    sessions: Mutex<HashMap<String, SessionRecord>>,
+    fail_saves: AtomicBool,
+}
+
+impl MemSessionRepository {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn session(&self, fingerprint: &str) -> Option<SessionRecord> {
+        self.sessions.lock().unwrap().get(fingerprint).cloned()
+    }
+
+    /// Makes every mutation fail, simulating a storage outage.
+    pub fn fail_saves(&self) {
+        self.fail_saves.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl SessionRepository for MemSessionRepository {
+    async fn save_session(&self, session: SessionRecord) -> Result<(), RepositoryError> {
+        if self.fail_saves.load(Ordering::SeqCst) {
+            return Err(RepositoryError::new("injected storage failure"));
+        }
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session.token_fingerprint.clone(), session);
+        Ok(())
+    }
+
+    async fn find_session_by_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<SessionRecord>, RepositoryError> {
+        Ok(self.sessions.lock().unwrap().get(fingerprint).cloned())
+    }
+
+    async fn update_last_seen_at(
+        &self,
+        fingerprint: &str,
+        at: SystemTime,
+    ) -> Result<(), RepositoryError> {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions.get_mut(fingerprint) {
+            session.last_seen_at = at;
+        }
+        Ok(())
+    }
+
+    async fn revoke_session(
+        &self,
+        fingerprint: &str,
+        revoked_at: SystemTime,
+    ) -> Result<(), RepositoryError> {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions.get_mut(fingerprint) {
+            session.revoked_at = Some(revoked_at);
+        }
+        Ok(())
+    }
+
+    async fn rotate_session(
+        &self,
+        old_fingerprint: &str,
+        new_session: SessionRecord,
+        revoked_at: SystemTime,
+    ) -> Result<(), RepositoryError> {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(old) = sessions.get_mut(old_fingerprint) {
+            old.revoked_at = Some(revoked_at);
+        }
+        sessions.insert(new_session.token_fingerprint.clone(), new_session);
+        Ok(())
+    }
+}
+
+/// How the fake password service answers verification calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FakePasswordMode {
+    /// Every verification succeeds.
+    Accept,
+    /// Every verification fails.
+    Reject,
+    /// Every verification errors internally.
+    Error,
+}
+
+/// Fake password service for application tests.
+pub struct FakePasswordService {
+    mode: Mutex<FakePasswordMode>,
+    /// Records whether each verification received a stored hash.
+    verify_calls: Mutex<Vec<bool>>,
+    hash_calls: AtomicU64,
+}
+
+impl FakePasswordService {
+    pub fn new(mode: FakePasswordMode) -> Self {
+        Self {
+            mode: Mutex::new(mode),
+            verify_calls: Mutex::new(Vec::new()),
+            hash_calls: AtomicU64::new(0),
+        }
+    }
+
+    /// Records whether each verify call received `Some(hash)`.
+    pub fn verify_calls(&self) -> Vec<bool> {
+        self.verify_calls.lock().unwrap().clone()
+    }
+
+    /// Number of hashing calls made.
+    pub fn hash_calls(&self) -> u64 {
+        self.hash_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl PasswordService for FakePasswordService {
+    async fn hash_password(
+        &self,
+        _password: SecretString,
+    ) -> Result<StoredPasswordHash, PasswordError> {
+        self.hash_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(StoredPasswordHash::new(SecretString::from(
+            "$argon2id$v=19$dummy".to_string(),
+        )))
+    }
+
+    async fn verify_password(
+        &self,
+        _password: SecretString,
+        expected_hash: Option<&StoredPasswordHash>,
+    ) -> Result<bool, PasswordError> {
+        self.verify_calls
+            .lock()
+            .unwrap()
+            .push(expected_hash.is_some());
+        match *self.mode.lock().unwrap() {
+            FakePasswordMode::Accept => Ok(true),
+            FakePasswordMode::Reject => Ok(false),
+            FakePasswordMode::Error => Err(PasswordError::HashingFailed),
+        }
+    }
+}
+
+/// Fake token service producing deterministic, test-friendly tokens.
+#[derive(Default)]
+pub struct FakeTokenService {
+    next: AtomicU64,
+    fail_generation: AtomicBool,
+    fail_fingerprint: AtomicBool,
+}
+
+impl FakeTokenService {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Makes token generation fail.
+    pub fn failing_generation(&self) {
+        self.fail_generation.store(true, Ordering::SeqCst);
+    }
+
+    /// Makes fingerprinting fail.
+    pub fn failing_fingerprint(&self) {
+        self.fail_fingerprint.store(true, Ordering::SeqCst);
+    }
+}
+
+impl SessionTokenService for FakeTokenService {
+    fn generate_token(&self) -> Result<SecretString, TokenError> {
+        if self.fail_generation.load(Ordering::SeqCst) {
+            return Err(TokenError::Generation);
+        }
+        let sequence = self.next.fetch_add(1, Ordering::SeqCst);
+        Ok(SecretString::from(format!("token-{sequence}")))
+    }
+
+    fn fingerprint(&self, token: &SecretString) -> Result<String, TokenError> {
+        if self.fail_fingerprint.load(Ordering::SeqCst) {
+            return Err(TokenError::Fingerprinting);
+        }
+        Ok(format!("fp-{}", token.expose_secret()))
+    }
+}
+
+/// Manually advanced clock for time-dependent tests.
+pub struct ManualClock {
+    now: Mutex<SystemTime>,
+}
+
+impl ManualClock {
+    pub fn new(at: SystemTime) -> Self {
+        Self { now: Mutex::new(at) }
+    }
+
+    pub fn advance(&self, by: Duration) {
+        let mut now = self.now.lock().unwrap();
+        *now = now.checked_add(by).expect("manual clock advance");
+    }
+}
+
+impl Clock for ManualClock {
+    fn now(&self) -> SystemTime {
+        *self.now.lock().unwrap()
     }
 }

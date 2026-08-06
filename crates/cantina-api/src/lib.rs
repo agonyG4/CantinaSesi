@@ -37,7 +37,20 @@ pub fn build_router() -> Router<AppState> {
 
 /// Builds the complete application (routes + middleware) for a state.
 pub fn app(state: AppState, config: &Config) -> Router<()> {
+    app_with_extra_routes(state, config, Router::new())
+}
+
+/// Builds the complete application plus the test-only role-guard routes.
+///
+/// The extra routes are never part of the production router; only integration
+/// tests mount them to exercise RBAC enforcement over the wire.
+pub fn app_with_test_routes(state: AppState, config: &Config) -> Router<()> {
+    app_with_extra_routes(state, config, routes::auth::test_only_router())
+}
+
+fn app_with_extra_routes(state: AppState, config: &Config, extra: Router<AppState>) -> Router<()> {
     build_router()
+        .merge(extra)
         .layer(PropagateRequestIdLayer::new(
             axum::http::header::HeaderName::from_static(REQUEST_ID_HEADER),
         ))

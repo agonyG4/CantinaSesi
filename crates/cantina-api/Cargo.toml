@@ -12,6 +12,7 @@ cantina-application = { path = "../cantina-application" }
 cantina-infrastructure = { path = "../cantina-infrastructure" }
 anyhow.workspace = true
 axum.workspace = true
+secrecy = { workspace = true, features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

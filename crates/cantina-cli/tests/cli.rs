@@ -78,6 +78,34 @@ fn start_truncated_server(status: u16) -> (String, std::thread::JoinHandle<()>) 
     (format!("http://{address}"), handle)
 }
 
+/// Starts a tiny server like [`start_server`] but passes the whole raw
+/// request (request line, headers and body) to the router.
+fn start_server_raw_request(
+    route: impl Fn(&str) -> (u16, String) + Send + 'static,
+) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buffer = [0u8; 8192];
+        let _ = stream.read(&mut buffer);
+
+        let text = String::from_utf8_lossy(&buffer).to_string();
+        let (status, body) = route(&text);
+
+        let reason = if status == 200 { "OK" } else { "ERROR" };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+    });
+
+    (format!("http://{address}"), handle)
+}
+
 const HEALTH_BODY: &str = r#"{"status":"healthy","service":"cantina-api","version":"0.1.0"}"#;
 
 const PRODUCTS_BODY: &str = r#"{"items":[
@@ -92,6 +120,10 @@ const CATEGORIES_BODY: &str = r#"{"items":[
 ]}"#;
 
 const NOT_FOUND_BODY: &str = r#"{"error":{"code":"NOT_FOUND","message":"the product with id 'x' was not found","request_id":"req-1"}}"#;
+
+const LOGIN_BODY: &str = r#"{"access_token":"opaque-token-123","token_type":"Bearer","expires_at_epoch_seconds":1893456000,"user":{"id":"user_student_1","name":"Ana Silva","email":"ana@example.com","role":"student","status":"active"}}"#;
+
+const ME_BODY: &str = r#"{"id":"user_student_1","name":"Ana Silva","email":"ana@example.com","role":"student","status":"active"}"#;
 
 #[test]
 fn version_command_prints_version() {
@@ -560,6 +592,345 @@ fn products_list_body_read_failure_is_reported() {
         !stderr.contains("UNKNOWN"),
         "a body-read failure must never degrade to an UNKNOWN error: {stderr}"
     );
+
+    server.join().unwrap();
+}
+
+#[test]
+fn auth_login_with_password_stdin_posts_credentials_and_prints_session() {
+    let (url, server) = start_server_raw_request(move |raw| {
+        let lines: Vec<&str> = raw.lines().collect();
+        let request_line = lines.first().unwrap_or(&"");
+        assert!(
+            request_line.starts_with("POST /api/v1/auth/login"),
+            "expected login POST, got: {request_line}"
+        );
+        assert!(
+            raw.contains("ana@example.com"),
+            "email must be sent in the body: {raw}"
+        );
+        assert!(
+            raw.contains("StudentDemo!2026"),
+            "password must be sent in the body: {raw}"
+        );
+        (200, LOGIN_BODY.to_string())
+    });
+
+    let mut child = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("auth")
+        .arg("login")
+        .arg("--email")
+        .arg("ana@example.com")
+        .arg("--password-stdin")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"StudentDemo!2026\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(
+        output.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("opaque-token-123"),
+        "the access token must be printed: {stdout}"
+    );
+    assert!(
+        stdout.contains("expires_at_epoch_seconds: 1893456000"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(stdout.contains("ana@example.com"), "unexpected stdout: {stdout}");
+
+    server.join().unwrap();
+}
+
+#[test]
+fn auth_login_json_mode_prints_the_exact_api_response() {
+    let (url, server) = start_server_raw_request(move |_| (200, LOGIN_BODY.to_string()));
+
+    let mut child = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--format")
+        .arg("json")
+        .arg("auth")
+        .arg("login")
+        .arg("--email")
+        .arg("ana@example.com")
+        .arg("--password-stdin")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"StudentDemo!2026\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("stdout must be valid JSON");
+    assert_eq!(json["access_token"], "opaque-token-123");
+    assert_eq!(json["token_type"], "Bearer");
+    assert_eq!(json["user"]["email"], "ana@example.com");
+
+    server.join().unwrap();
+}
+
+#[test]
+fn auth_login_with_empty_stdin_fails() {
+    let (url, server) = start_server_raw_request(move |_| (200, LOGIN_BODY.to_string()));
+
+    let mut child = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("auth")
+        .arg("login")
+        .arg("--email")
+        .arg("ana@example.com")
+        .arg("--password-stdin")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("a password is required"), "unexpected stderr: {stderr}");
+
+    server.join().unwrap();
+}
+
+#[test]
+fn auth_login_reports_api_error_responses() {
+    let body = r#"{"error":{"code":"INVALID_CREDENTIALS","message":"invalid email or password","request_id":"req-7"}}"#;
+    let (url, server) = start_server_raw_request(move |_| (401, body.to_string()));
+
+    let mut child = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("auth")
+        .arg("login")
+        .arg("--email")
+        .arg("ana@example.com")
+        .arg("--password-stdin")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"wrong-password\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("HTTP 401"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("invalid email or password"),
+        "structured error message must surface: {stderr}"
+    );
+
+    server.join().unwrap();
+}
+
+#[test]
+fn auth_me_prints_user_table() {
+    let (url, server) = start_server_raw_request(move |raw| {
+        let lines: Vec<&str> = raw.lines().collect();
+        let request_line = lines.first().unwrap_or(&"");
+        assert!(
+            request_line.starts_with("GET /api/v1/auth/me"),
+            "expected me GET, got: {request_line}"
+        );
+        assert!(
+            raw.contains("Bearer opaque-token-123"),
+            "the bearer token must be attached: {raw}"
+        );
+        (200, ME_BODY.to_string())
+    });
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("auth")
+        .arg("me")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let header: Vec<&str> = stdout.lines().next().unwrap().split_whitespace().collect();
+    assert_eq!(
+        header,
+        vec!["ID", "NAME", "EMAIL", "ROLE", "STATUS"],
+        "a deterministic header must be rendered"
+    );
+    assert!(
+        stdout.contains("user_student_1"),
+        "the user id must appear: {stdout}"
+    );
+    assert!(stdout.contains("Ana Silva"), "unexpected stdout: {stdout}");
+
+    server.join().unwrap();
+}
+
+#[test]
+fn auth_me_reads_token_from_environment() {
+    let (url, server) = start_server_raw_request(move |raw| {
+        assert!(
+            raw.contains("Bearer env-token"),
+            "the environment token must be attached: {raw}"
+        );
+        (200, ME_BODY.to_string())
+    });
+
+    let output = Command::new(BIN)
+        .env("CANTINA_ACCESS_TOKEN", "env-token")
+        .arg("--api-url")
+        .arg(&url)
+        .arg("auth")
+        .arg("me")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn auth_me_without_token_fails() {
+    let (url, server) = start_server_raw_request(move |_| (200, ME_BODY.to_string()));
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("auth")
+        .arg("me")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("authentication required"),
+        "unexpected stderr: {stderr}"
+    );
+
+    server.join().unwrap();
+}
+
+#[test]
+fn auth_refresh_prints_a_new_session() {
+    let (url, server) = start_server_raw_request(move |raw| {
+        let lines: Vec<&str> = raw.lines().collect();
+        let request_line = lines.first().unwrap_or(&"");
+        assert!(
+            request_line.starts_with("POST /api/v1/auth/refresh"),
+            "expected refresh POST, got: {request_line}"
+        );
+        assert!(
+            raw.contains("Bearer opaque-token-123"),
+            "the bearer token must be attached: {raw}"
+        );
+        (200, LOGIN_BODY.to_string())
+    });
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("auth")
+        .arg("refresh")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("opaque-token-123"),
+        "the new access token must be printed: {stdout}"
+    );
+
+    server.join().unwrap();
+}
+
+#[test]
+fn auth_logout_prints_logged_out() {
+    let (url, server) = start_server_raw_request(move |raw| {
+        let lines: Vec<&str> = raw.lines().collect();
+        let request_line = lines.first().unwrap_or(&"");
+        assert!(
+            request_line.starts_with("POST /api/v1/auth/logout"),
+            "expected logout POST, got: {request_line}"
+        );
+        assert!(
+            raw.contains("Bearer opaque-token-123"),
+            "the bearer token must be attached: {raw}"
+        );
+        (204, String::new())
+    });
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("auth")
+        .arg("logout")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("logged out"), "unexpected stdout: {stdout}");
 
     server.join().unwrap();
 }

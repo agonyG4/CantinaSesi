@@ -12,10 +12,11 @@ use tokio::net::TcpListener;
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    let config = Config::from_env();
-    let repositories =
-        InMemoryRepositories::with_seed_data().context("failed to seed repositories")?;
-    let state = bootstrap::build_state(repositories);
+    let config = Config::from_env().context("failed to load configuration")?;
+    let repositories = InMemoryRepositories::with_seed_data()
+        .await
+        .context("failed to seed repositories")?;
+    let state = bootstrap::build_state(repositories, &config);
     let router = app(state, &config);
 
     let address = config.bind_address().to_string();

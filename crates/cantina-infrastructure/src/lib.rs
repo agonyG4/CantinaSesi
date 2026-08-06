@@ -6,7 +6,7 @@
 //! * `config`: environment-driven configuration with development defaults;
 //! * `persistence`: repository adapters that implement the application
 //!   ports (in-memory for now; a real database comes later);
-//! * `security`: placeholder password/token implementations;
+//! * `security`: Argon2id password hashing and opaque session tokens;
 //! * `time`: a system clock implementing the application `Clock` port;
 //! * `identifiers`: id and pickup-code generators.
 //!

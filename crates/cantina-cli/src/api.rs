@@ -52,6 +52,25 @@ pub struct CategoryListResponse {
     pub items: Vec<CategoryDto>,
 }
 
+/// HTTP representation of an authenticated user, mirroring the API DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserDto {
+    pub id: String,
+    pub name: String,
+    pub email: String,
+    pub role: String,
+    pub status: String,
+}
+
+/// Authentication payload returned by `login` and `refresh`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthenticationResponse {
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_at_epoch_seconds: u64,
+    pub user: UserDto,
+}
+
 /// Query filters sent to `GET /api/v1/products`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProductsQuery {
@@ -149,6 +168,21 @@ pub enum CliError {
         source: serde_json::Error,
     },
 
+    /// An authenticated command was run without a token.
+    #[error("authentication required: pass --token or set CANTINA_ACCESS_TOKEN")]
+    MissingAccessToken,
+
+    /// The password prompt or stdin read failed.
+    #[error("failed to read the password: {source}")]
+    PasswordRead {
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The password was empty.
+    #[error("a password is required")]
+    EmptyPassword,
+
     /// A command that has not been implemented yet.
     #[error("command not implemented yet: {command}")]
     NotImplemented { command: &'static str },
@@ -203,6 +237,66 @@ impl ApiClient {
         self.get_json("/api/v1/categories", &[]).await
     }
 
+    /// Calls `POST /api/v1/auth/login` with the given credentials.
+    pub async fn login(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<AuthenticationResponse, CliError> {
+        let body = serde_json::json!({ "email": email, "password": password });
+        self.post_json("/api/v1/auth/login", &body, None).await
+    }
+
+    /// Calls `GET /api/v1/auth/me` with the given access token.
+    pub async fn me(&self, token: &str) -> Result<UserDto, CliError> {
+        self.get_json_with_token("/api/v1/auth/me", &[], Some(token))
+            .await
+    }
+
+    /// Calls `POST /api/v1/auth/refresh` with the given access token.
+    pub async fn refresh(&self, token: &str) -> Result<AuthenticationResponse, CliError> {
+        self.post_json("/api/v1/auth/refresh", &serde_json::json!({}), Some(token))
+            .await
+    }
+
+    /// Calls `POST /api/v1/auth/logout` with the given access token.
+    pub async fn logout(&self, token: &str) -> Result<(), CliError> {
+        let url = self
+            .base_url
+            .join("/api/v1/auth/logout")
+            .map_err(|err| CliError::InvalidApiUrl {
+                url: self.base_url.to_string(),
+                message: err.to_string(),
+            })?;
+        let url_string = url.to_string();
+
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|source| {
+                if source.is_timeout() {
+                    CliError::Timeout {
+                        url: url_string.clone(),
+                        timeout: REQUEST_TIMEOUT.as_secs(),
+                    }
+                } else {
+                    CliError::Transport {
+                        url: url_string.clone(),
+                        source,
+                    }
+                }
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(self.error_from_response(status, response).await?);
+        }
+        Ok(())
+    }
+
     /// Performs a GET request, joins the path onto the base URL and decodes
     /// the response into `T`, translating API errors into [`CliError`].
     async fn get_json<T: DeserializeOwned>(
@@ -210,6 +304,45 @@ impl ApiClient {
         path: &str,
         query: &[(&str, String)],
     ) -> Result<T, CliError> {
+        self.get_json_with_token(path, query, None).await
+    }
+
+    /// Like [`Self::get_json`] but attaches a bearer token.
+    async fn get_json_with_token<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        token: Option<&str>,
+    ) -> Result<T, CliError> {
+        let url_string = self
+            .build_url(path, query)?
+            .to_string();
+        let mut request = self.client.get(&url_string);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        self.send_json(request, url_string).await
+    }
+
+    /// Performs a POST request with an optional JSON body and bearer token.
+    async fn post_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        token: Option<&str>,
+    ) -> Result<T, CliError> {
+        let url_string = self
+            .build_url(path, &[])?
+            .to_string();
+        let mut request = self.client.post(&url_string).json(body);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        self.send_json(request, url_string).await
+    }
+
+    /// Joins a path onto the base URL and appends the query pairs.
+    fn build_url(&self, path: &str, query: &[(&str, String)]) -> Result<Url, CliError> {
         let mut url = self
             .base_url
             .join(path)
@@ -224,9 +357,16 @@ impl ApiClient {
             }
             drop(pairs);
         }
-        let url_string = url.to_string();
+        Ok(url)
+    }
 
-        let response = self.client.get(url).send().await.map_err(|source| {
+    /// Sends a prepared request and decodes the JSON body.
+    async fn send_json<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+        url_string: String,
+    ) -> Result<T, CliError> {
+        let response = request.send().await.map_err(|source| {
             if source.is_timeout() {
                 CliError::Timeout {
                     url: url_string.clone(),

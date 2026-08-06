@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 cantina-core = { path = "../cantina-core" }
 async-trait.workspace = true
+secrecy.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

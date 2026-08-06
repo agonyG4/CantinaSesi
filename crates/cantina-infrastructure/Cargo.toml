@@ -9,7 +9,13 @@ repository.workspace = true
 [dependencies]
 cantina-core = { path = "../cantina-core" }
 cantina-application = { path = "../cantina-application" }
+argon2.workspace = true
 async-trait.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+secrecy.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true

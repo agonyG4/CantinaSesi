@@ -1,8 +1,8 @@
 //! Centralized HTTP error conversion.
 //!
 //! Application errors are translated into a standardized JSON error body.
-//! Internal details (messages from storage backends, stack traces) are never
-//! leaked to clients.
+//! Internal details (messages from storage backends, stack traces, password
+//! hashes, tokens) are never leaked to clients.
 
 use axum::Json;
 use axum::extract::Request;
@@ -13,6 +13,9 @@ use tower_http::request_id::RequestId;
 use utoipa::ToSchema;
 
 use cantina_application::ApplicationError;
+
+/// Header returned on authentication failures.
+pub(crate) const WWW_AUTHENTICATE_BEARER: &str = "Bearer";
 
 /// Standardized error payload returned to clients.
 #[derive(Debug, Serialize, ToSchema)]
@@ -34,12 +37,21 @@ pub(crate) struct ErrorResponse {
 pub struct ApiError {
     status: StatusCode,
     body: ErrorBody,
+    /// Whether the response must challenge the client with `WWW-Authenticate`.
+    challenge: bool,
 }
 
 impl ApiError {
     /// Attaches the request identifier to the error body.
     pub fn with_request_id(mut self, request_id: Option<String>) -> Self {
         self.body.request_id = request_id;
+        self
+    }
+
+    /// Marks the error as an authentication challenge that must return a
+    /// `WWW-Authenticate: Bearer` header.
+    pub fn with_bearer_challenge(mut self) -> Self {
+        self.challenge = true;
         self
     }
 
@@ -52,47 +64,110 @@ impl ApiError {
                 message: message.into(),
                 request_id: None,
             },
+            challenge: false,
+        }
+    }
+
+    /// Builds the stable error for an invalid or oversized request body.
+    pub fn invalid_request_body() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            body: ErrorBody {
+                code: "INVALID_REQUEST_BODY",
+                message: "the request body is invalid".to_string(),
+                request_id: None,
+            },
+            challenge: false,
         }
     }
 }
 
 impl From<ApplicationError> for ApiError {
     fn from(err: ApplicationError) -> Self {
-        let (status, code, message) = match err {
+        let (status, code, message, challenge) = match err {
             ApplicationError::NotFound { resource, id } => (
                 StatusCode::NOT_FOUND,
                 "NOT_FOUND",
                 format!("the {resource} with id '{id}' was not found"),
+                false,
             ),
             ApplicationError::ProductUnavailable { product_id } => (
                 StatusCode::CONFLICT,
                 "PRODUCT_UNAVAILABLE",
                 format!("product '{product_id}' is not available"),
+                false,
             ),
             ApplicationError::EmptyOrder => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "EMPTY_ORDER",
                 "an order must contain at least one item".to_string(),
+                false,
             ),
             ApplicationError::InvalidQuantity => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "INVALID_QUANTITY",
                 "item quantity must be greater than zero".to_string(),
+                false,
             ),
             ApplicationError::InvalidStatusTransition { from, to } => (
                 StatusCode::CONFLICT,
                 "INVALID_STATUS_TRANSITION",
                 format!("cannot transition order from '{from}' to '{to}'"),
+                false,
+            ),
+            ApplicationError::InvalidCredentials => (
+                StatusCode::UNAUTHORIZED,
+                "INVALID_CREDENTIALS",
+                "invalid email or password".to_string(),
+                true,
+            ),
+            ApplicationError::AccountInactive => (
+                StatusCode::FORBIDDEN,
+                "ACCOUNT_INACTIVE",
+                "this account is inactive".to_string(),
+                true,
+            ),
+            ApplicationError::AuthenticationRequired => (
+                StatusCode::UNAUTHORIZED,
+                "AUTHENTICATION_REQUIRED",
+                "authentication is required".to_string(),
+                true,
+            ),
+            ApplicationError::InvalidAccessToken => (
+                StatusCode::UNAUTHORIZED,
+                "INVALID_ACCESS_TOKEN",
+                "the access token is invalid".to_string(),
+                true,
+            ),
+            ApplicationError::SessionExpired => (
+                StatusCode::UNAUTHORIZED,
+                "SESSION_EXPIRED",
+                "the session has expired".to_string(),
+                true,
+            ),
+            ApplicationError::Forbidden => (
+                StatusCode::FORBIDDEN,
+                "FORBIDDEN",
+                "forbidden".to_string(),
+                true,
+            ),
+            ApplicationError::PasswordProcessing | ApplicationError::TokenGeneration => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "internal server error".to_string(),
+                false,
             ),
             ApplicationError::NotImplemented { feature } => (
                 StatusCode::NOT_IMPLEMENTED,
                 "NOT_IMPLEMENTED",
                 format!("{feature} is not implemented yet"),
+                false,
             ),
             ApplicationError::Storage(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "INTERNAL_ERROR",
                 "internal server error".to_string(),
+                false,
             ),
         };
         Self {
@@ -102,14 +177,23 @@ impl From<ApplicationError> for ApiError {
                 message,
                 request_id: None,
             },
+            challenge,
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = self.status;
-        (status, Json(ErrorResponse { error: self.body })).into_response()
+        let mut response = (self.status, Json(ErrorResponse { error: self.body })).into_response();
+        if self.challenge {
+            if let Ok(value) = axum::http::HeaderValue::from_str(WWW_AUTHENTICATE_BEARER) {
+                response.headers_mut().insert(
+                    axum::http::header::WWW_AUTHENTICATE,
+                    value,
+                );
+            }
+        }
+        response
     }
 }
 
@@ -117,6 +201,15 @@ impl IntoResponse for ApiError {
 pub fn extract_request_id(request: &Request) -> Option<String> {
     request
         .extensions()
+        .get::<RequestId>()
+        .and_then(|request_id| request_id.header_value().to_str().ok())
+        .map(ToOwned::to_owned)
+}
+
+/// Extracts the request identifier from request parts.
+pub fn extract_request_id_from_parts(parts: &axum::http::request::Parts) -> Option<String> {
+    parts
+        .extensions
         .get::<RequestId>()
         .and_then(|request_id| request_id.header_value().to_str().ok())
         .map(ToOwned::to_owned)

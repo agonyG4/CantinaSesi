@@ -5,24 +5,20 @@
 //! for the foundation. All adapters implement the application-owned ports.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use secrecy::SecretString;
 
 use cantina_application::ports::{
-    CategoryRepository, OrderRepository, ProductRepository, RepositoryError, UserRepository,
+    CategoryRepository, OrderRepository, PasswordService, ProductRepository, RepositoryError,
+    UserRepository,
 };
 use cantina_core::catalog::{Category, CategoryId, Product, ProductId};
 use cantina_core::orders::{Order, OrderId};
 use cantina_core::users::{User, UserId, UserRole, UserStatus};
 
-type Store<T> = Mutex<HashMap<String, T>>;
-
-fn lock_store<T>(store: &Store<T>) -> Result<MutexGuard<'_, HashMap<String, T>>, RepositoryError> {
-    store
-        .lock()
-        .map_err(|_| RepositoryError::new("repository lock poisoned"))
-}
+use super::{lock_store, Store, InMemoryCredentialRepository, InMemorySessionRepository};
 
 /// In-memory adapter for the `UserRepository` port.
 pub struct InMemoryUserRepository {
@@ -202,6 +198,8 @@ impl OrderRepository for InMemoryOrderRepository {
 #[derive(Clone)]
 pub struct InMemoryRepositories {
     pub users: Arc<InMemoryUserRepository>,
+    pub credentials: Arc<InMemoryCredentialRepository>,
+    pub sessions: Arc<InMemorySessionRepository>,
     pub products: Arc<InMemoryProductRepository>,
     pub categories: Arc<InMemoryCategoryRepository>,
     pub orders: Arc<InMemoryOrderRepository>,
@@ -212,16 +210,21 @@ impl InMemoryRepositories {
     pub fn new() -> Self {
         Self {
             users: Arc::new(InMemoryUserRepository::new()),
+            credentials: Arc::new(InMemoryCredentialRepository::new()),
+            sessions: Arc::new(InMemorySessionRepository::new()),
             products: Arc::new(InMemoryProductRepository::new()),
             categories: Arc::new(InMemoryCategoryRepository::new()),
             orders: Arc::new(InMemoryOrderRepository::new()),
         }
     }
 
-    /// Creates repositories pre-loaded with a demonstration catalog covering
-    /// several categories, available products and one unavailable product so
-    /// catalog filtering can be exercised.
-    pub fn with_seed_data() -> Result<Self, RepositoryError> {
+    /// Creates repositories pre-loaded with a demonstration catalog and demo
+    /// accounts.
+    ///
+    /// Demo users are development-only, clearly labeled in the documentation,
+    /// and their passwords are hashed exactly once at seed time with the real
+    /// Argon2id adapter. Never deploy these accounts.
+    pub async fn with_seed_data() -> Result<Self, RepositoryError> {
         let repos = Self::new();
 
         repos
@@ -279,15 +282,74 @@ impl InMemoryRepositories {
             false,
         ))?;
 
-        repos.users.insert(User::new(
-            UserId::new("user_student_1"),
-            "Ana Souza",
-            "ana@example.com",
-            UserRole::Student,
-            UserStatus::Active,
-        ))?;
+        repos
+            .insert_demo_user(
+                "user_student_1",
+                "Ana Souza",
+                "ana@example.com",
+                UserRole::Student,
+                UserStatus::Active,
+                "StudentDemo!2026",
+            )
+            .await?;
+        repos
+            .insert_demo_user(
+                "user_canteen_1",
+                "Maria Canteen",
+                "cantina@example.com",
+                UserRole::Canteen,
+                UserStatus::Active,
+                "CanteenDemo!2026",
+            )
+            .await?;
+        repos
+            .insert_demo_user(
+                "user_admin_1",
+                "Admin Root",
+                "admin@example.com",
+                UserRole::Admin,
+                UserStatus::Active,
+                "AdminDemo!2026",
+            )
+            .await?;
+        repos
+            .insert_demo_user(
+                "user_inactive_1",
+                "Inactive Student",
+                "inactive@example.com",
+                UserRole::Student,
+                UserStatus::Inactive,
+                "InactiveDemo!2026",
+            )
+            .await?;
 
         Ok(repos)
+    }
+
+    /// Inserts a demo user and hashes its password once at seed time.
+    async fn insert_demo_user(
+        &self,
+        id: &str,
+        name: &str,
+        email: &str,
+        role: UserRole,
+        status: UserStatus,
+        password: &str,
+    ) -> Result<(), RepositoryError> {
+        let passwords = crate::security::passwords::Argon2PasswordService::new();
+        let hash = passwords
+            .hash_password(SecretString::from(password.to_string()))
+            .await
+            .map_err(|_| RepositoryError::new("failed to hash demo password"))?;
+        self.users.insert(User::new(
+            UserId::new(id),
+            name,
+            email,
+            role,
+            status,
+        ))?;
+        self.credentials.insert(&UserId::new(id), hash)?;
+        Ok(())
     }
 }
 
@@ -299,15 +361,17 @@ impl Default for InMemoryRepositories {
 
 #[cfg(test)]
 mod tests {
-    use cantina_application::ports::{CategoryRepository, ProductRepository};
+    use cantina_application::ports::{CategoryRepository, ProductRepository, UserRepository};
     use cantina_core::catalog::{Category, CategoryId, Product, ProductId};
     use cantina_core::users::{User, UserId, UserRole, UserStatus};
 
     use super::InMemoryRepositories;
 
-    #[test]
-    fn seeded_repositories_expose_demo_data() {
-        let repos = InMemoryRepositories::with_seed_data().expect("seed repositories");
+    #[tokio::test]
+    async fn seeded_repositories_expose_demo_data() {
+        let repos = InMemoryRepositories::with_seed_data()
+            .await
+            .expect("seed repositories");
         assert!(
             repos
                 .products
@@ -343,7 +407,9 @@ mod tests {
 
     #[tokio::test]
     async fn seed_data_covers_available_and_unavailable_products() {
-        let repos = InMemoryRepositories::with_seed_data().expect("seed repositories");
+        let repos = InMemoryRepositories::with_seed_data()
+            .await
+            .expect("seed repositories");
         let (mut available, mut unavailable) = (0u32, 0u32);
         for product in repos.products.list_products().await.expect("list products") {
             if product.is_available() {
@@ -358,12 +424,46 @@ mod tests {
 
     #[tokio::test]
     async fn seed_categories_cover_at_least_two_entries() {
-        let repos = InMemoryRepositories::with_seed_data().expect("seed repositories");
+        let repos = InMemoryRepositories::with_seed_data()
+            .await
+            .expect("seed repositories");
         let categories = repos
             .categories
             .list_categories()
             .await
             .expect("list categories");
         assert!(categories.len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn seed_exposes_demo_users_with_credentials() {
+        let repos = InMemoryRepositories::with_seed_data()
+            .await
+            .expect("seed repositories");
+
+        let ana = repos
+            .users
+            .find_user_by_email("ana@example.com")
+            .await
+            .expect("find user")
+            .expect("ana must be seeded");
+        assert_eq!(ana.name(), "Ana Souza");
+        assert_eq!(ana.role(), UserRole::Student);
+        assert!(ana.is_active());
+
+        let inactive = repos
+            .users
+            .find_user_by_email("inactive@example.com")
+            .await
+            .expect("find user")
+            .expect("inactive user must be seeded");
+        assert!(!inactive.is_active());
+
+        let found = repos
+            .users
+            .find_user_by_email("cantina@example.com")
+            .await
+            .expect("find user");
+        assert!(found.is_some(), "canteen demo user must exist");
     }
 }

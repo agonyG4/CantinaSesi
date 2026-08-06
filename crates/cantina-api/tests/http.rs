@@ -10,6 +10,7 @@ use serde_json::Value;
 use tower::util::ServiceExt;
 
 use cantina_api::app;
+use cantina_api::app_with_test_routes;
 use cantina_api::bootstrap;
 use cantina_api::state::AppState;
 use cantina_application::auth::AuthService;
@@ -41,19 +42,35 @@ impl ProductRepository for FailingProductRepository {
     }
 }
 
-/// Router backed by the seeded in-memory repositories.
+/// Router backed by the seeded in-memory repositories, including the
+/// test-only RBAC guard routes.
 async fn router() -> axum::Router<()> {
-    let repositories = InMemoryRepositories::with_seed_data().expect("seed repositories");
-    let state = bootstrap::build_state(repositories);
-    app(state, &Config::development())
+    let repositories = InMemoryRepositories::with_seed_data()
+        .await
+        .expect("seed repositories");
+    let state = bootstrap::build_state(repositories, &Config::development());
+    app_with_test_routes(state, &Config::development())
 }
 
 /// Router whose catalog is backed by a failing product repository.
 async fn failing_router() -> axum::Router<()> {
-    let repositories = InMemoryRepositories::with_seed_data().expect("seed repositories");
+    let repositories = InMemoryRepositories::with_seed_data()
+        .await
+        .expect("seed repositories");
     let ids: Arc<dyn IdGenerator> = Arc::new(Generator::new());
     let pickup_codes: Arc<dyn PickupCodeGenerator> = Arc::new(DefaultPickupCodeGenerator::new());
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let config = Config::development();
+
+    let auth = AuthService::new(
+        repositories.users.clone(),
+        repositories.credentials.clone(),
+        repositories.sessions.clone(),
+        Arc::new(cantina_infrastructure::security::passwords::Argon2PasswordService::new()),
+        Arc::new(cantina_infrastructure::security::tokens::OsRngSessionTokenService),
+        clock.clone(),
+        config.session_config(),
+    );
 
     let state = AppState::new(
         Arc::new(CatalogService::new(
@@ -67,9 +84,9 @@ async fn failing_router() -> axum::Router<()> {
             pickup_codes,
             clock,
         )),
-        Arc::new(AuthService::new(repositories.users.clone())),
+        Arc::new(auth),
     );
-    app(state, &Config::development())
+    app(state, &config)
 }
 
 async fn raw_get(uri: &str) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
@@ -104,6 +121,93 @@ async fn get_from(
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     (status, headers, json)
+}
+
+async fn post(
+    router: &axum::Router<()>,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    if body.is_empty() {
+        return (status, headers, Value::Null);
+    }
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    (status, headers, json)
+}
+
+async fn authenticated_get(
+    router: &axum::Router<()>,
+    uri: &str,
+    token: &str,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    (status, headers, json)
+}
+
+/// Logs in as the seeded student and returns the access token.
+async fn student_token(router: &axum::Router<()>) -> String {
+    let (status, _, json) = post(
+        router,
+        "/api/v1/auth/login",
+        serde_json::json!({
+            "email": "ana@example.com",
+            "password": "StudentDemo!2026"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "student login must succeed");
+    json["access_token"].as_str().unwrap().to_string()
+}
+
+async fn raw_authenticated_get(
+    router: &axum::Router<()>,
+    uri: &str,
+    token: &str,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, body.to_vec())
 }
 
 #[tokio::test]
@@ -379,4 +483,238 @@ async fn storage_failure_returns_centralized_internal_error() {
         !body.contains("injected storage failure"),
         "internal storage details must never leak to clients"
     );
+}
+
+#[tokio::test]
+async fn login_with_valid_credentials_returns_session() {
+    let router = router().await;
+    let (status, headers, json) = post(
+        &router,
+        "/api/v1/auth/login",
+        serde_json::json!({
+            "email": "ana@example.com",
+            "password": "StudentDemo!2026"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_eq!(headers["pragma"], "no-cache");
+    assert!(json["access_token"].as_str().unwrap().len() > 32);
+    assert_eq!(json["token_type"], "Bearer");
+    assert!(json["expires_at_epoch_seconds"].as_u64().is_some());
+    assert_eq!(json["user"]["email"], "ana@example.com");
+    assert_eq!(json["user"]["role"], "student");
+    assert_eq!(json["user"]["status"], "active");
+}
+
+#[tokio::test]
+async fn login_with_wrong_password_is_a_stable_401() {
+    let router = router().await;
+    let (status, _, json) = post(
+        &router,
+        "/api/v1/auth/login",
+        serde_json::json!({
+            "email": "ana@example.com",
+            "password": "wrong-password"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(json["error"]["code"], "INVALID_CREDENTIALS");
+    assert_eq!(json["error"]["message"], "invalid email or password");
+}
+
+#[tokio::test]
+async fn login_with_unknown_email_is_a_stable_401() {
+    let router = router().await;
+    let (status, _, json) = post(
+        &router,
+        "/api/v1/auth/login",
+        serde_json::json!({
+            "email": "ghost@example.com",
+            "password": "whatever"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(json["error"]["code"], "INVALID_CREDENTIALS");
+}
+
+#[tokio::test]
+async fn login_with_inactive_account_is_a_403() {
+    let router = router().await;
+    let (status, _, json) = post(
+        &router,
+        "/api/v1/auth/login",
+        serde_json::json!({
+            "email": "inactive@example.com",
+            "password": "InactiveDemo!2026"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json["error"]["code"], "ACCOUNT_INACTIVE");
+}
+
+#[tokio::test]
+async fn login_with_invalid_body_is_a_400() {
+    let router = router().await;
+    let (status, _, json) = post(
+        &router,
+        "/api/v1/auth/login",
+        serde_json::json!({ "email": "ana@example.com" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["code"], "INVALID_REQUEST_BODY");
+}
+
+#[tokio::test]
+async fn login_normalizes_email_case() {
+    let router = router().await;
+    let (status, _, _) = post(
+        &router,
+        "/api/v1/auth/login",
+        serde_json::json!({
+            "email": "  ANA@Example.COM  ",
+            "password": "StudentDemo!2026"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "email must be normalized to ASCII lowercase");
+}
+
+#[tokio::test]
+async fn me_returns_the_authenticated_user() {
+    let router = router().await;
+    let token = student_token(&router).await;
+    let (status, _, json) = authenticated_get(&router, "/api/v1/auth/me", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["email"], "ana@example.com");
+    assert_eq!(json["role"], "student");
+}
+
+#[tokio::test]
+async fn me_without_token_is_a_bearer_challenge() {
+    let router = router().await;
+    let (status, headers, json) = authenticated_get(&router, "/api/v1/auth/me", "").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(json["error"]["code"], "AUTHENTICATION_REQUIRED");
+    assert_eq!(headers["www-authenticate"], "Bearer");
+}
+
+#[tokio::test]
+async fn me_with_invalid_token_is_a_401() {
+    let router = router().await;
+    let (status, _, json) = authenticated_get(&router, "/api/v1/auth/me", "not-a-real-token").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(json["error"]["code"], "INVALID_ACCESS_TOKEN");
+}
+
+#[tokio::test]
+async fn refresh_issues_a_new_valid_session() {
+    let router = router().await;
+    let token = student_token(&router).await;
+
+    let (status, _, _) = post(&router, "/api/v1/auth/refresh", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "refresh requires a token");
+
+    let refreshed = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refreshed.status(), StatusCode::OK);
+    let headers = refreshed.headers().clone();
+    let body = refreshed.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["access_token"].as_str().is_some());
+    assert_eq!(json["token_type"], "Bearer");
+    assert_eq!(headers["cache-control"], "no-store");
+}
+
+#[tokio::test]
+async fn logout_revokes_the_session() {
+    let router = router().await;
+    let token = student_token(&router).await;
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/logout")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let (status, _, _) = authenticated_get(&router, "/api/v1/auth/me", &token).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "revoked token must be rejected");
+}
+
+#[tokio::test]
+async fn admin_can_access_admin_only_route() {
+    let router = router().await;
+    let (status, _, json) = post(
+        &router,
+        "/api/v1/auth/login",
+        serde_json::json!({
+            "email": "admin@example.com",
+            "password": "AdminDemo!2026"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = json["access_token"].as_str().unwrap().to_string();
+    let (status, _, body) = raw_authenticated_get(&router, "/roles/admin-only", &token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(String::from_utf8(body).unwrap(), "allowed");
+}
+
+#[tokio::test]
+async fn student_is_forbidden_from_admin_only_route() {
+    let router = router().await;
+    let token = student_token(&router).await;
+    let (status, headers, json) = authenticated_get(&router, "/roles/admin-only", &token).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json["error"]["code"], "FORBIDDEN");
+    assert_eq!(headers["www-authenticate"], "Bearer");
+}
+
+#[tokio::test]
+async fn canteen_can_access_canteen_or_admin_route_but_student_cannot() {
+    let router = router().await;
+
+    let (status, _, json) = post(
+        &router,
+        "/api/v1/auth/login",
+        serde_json::json!({
+            "email": "cantina@example.com",
+            "password": "CanteenDemo!2026"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let canteen_token = json["access_token"].as_str().unwrap().to_string();
+    let (status, _, body) = raw_authenticated_get(&router, "/roles/canteen-admin", &canteen_token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(String::from_utf8(body).unwrap(), "allowed");
+
+    let student = student_token(&router).await;
+    let (status, _, json) = authenticated_get(&router, "/roles/canteen-admin", &student).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json["error"]["code"], "FORBIDDEN");
 }

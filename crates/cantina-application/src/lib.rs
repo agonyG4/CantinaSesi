@@ -22,6 +22,9 @@ pub mod users;
 pub mod test_support;
 
 #[cfg(test)]
+mod auth_tests;
+
+#[cfg(test)]
 mod catalog_tests;
 
 #[cfg(test)]
