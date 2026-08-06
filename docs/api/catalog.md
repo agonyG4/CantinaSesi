@@ -4,7 +4,8 @@ The catalog slice exposes products and categories for reading. This is the
 contract the frontend builds against. It is described formally in the OpenAPI
 document served at `GET /api/openapi.json`.
 
-All endpoints are unauthenticated in this stage and only support `GET`.
+All endpoints in this slice are unauthenticated and only support `GET`.
+Authentication lives in `docs/api/authentication.md`.
 
 ## Money representation
 

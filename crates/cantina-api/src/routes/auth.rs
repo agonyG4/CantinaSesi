@@ -13,6 +13,7 @@
 //!   or logs.
 
 use axum::Json;
+use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequestParts, State};
 use axum::http::header;
@@ -20,12 +21,11 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use cantina_application::auth::{AuthenticationResult, AuthenticateUserCommand};
+use cantina_application::auth::{AuthenticateUserCommand, AuthenticationResult};
 use cantina_application::users::UserDto;
 use cantina_core::auth::Principal;
 use cantina_core::users::UserRole;
@@ -109,7 +109,8 @@ impl FromRequestParts<AppState> for AuthenticatedPrincipal {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let request_id = extract_request_id_from_parts(parts);
-        let token = bearer_token(&parts.headers).map_err(|err| err.with_request_id(request_id.clone()))?;
+        let token =
+            bearer_token(&parts.headers).map_err(|err| err.with_request_id(request_id.clone()))?;
         let principal = state
             .auth
             .authenticate_access_token(&token)
@@ -146,22 +147,16 @@ impl FromRequestParts<AppState> for CurrentBearerToken {
 /// header or blank token is an `AUTHENTICATION_REQUIRED` challenge; the token
 /// itself is never logged or stored.
 fn bearer_token(headers: &HeaderMap) -> Result<SecretString, ApiError> {
-    let header = headers
-        .get(header::AUTHORIZATION)
-        .ok_or_else(|| {
-            ApiError::from(cantina_application::ApplicationError::AuthenticationRequired)
-        })?;
-    let value = header
-        .to_str()
-        .map_err(|_| {
-            ApiError::from(cantina_application::ApplicationError::AuthenticationRequired)
-        })?;
+    let header = headers.get(header::AUTHORIZATION).ok_or_else(|| {
+        ApiError::from(cantina_application::ApplicationError::AuthenticationRequired)
+    })?;
+    let value = header.to_str().map_err(|_| {
+        ApiError::from(cantina_application::ApplicationError::AuthenticationRequired)
+    })?;
 
-    let (scheme, token) = value
-        .split_once(' ')
-        .ok_or_else(|| {
-            ApiError::from(cantina_application::ApplicationError::AuthenticationRequired)
-        })?;
+    let (scheme, token) = value.split_once(' ').ok_or_else(|| {
+        ApiError::from(cantina_application::ApplicationError::AuthenticationRequired)
+    })?;
 
     if !scheme.eq_ignore_ascii_case("bearer") {
         return Err(ApiError::from(

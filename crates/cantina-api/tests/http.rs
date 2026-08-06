@@ -582,7 +582,11 @@ async fn login_normalizes_email_case() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "email must be normalized to ASCII lowercase");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "email must be normalized to ASCII lowercase"
+    );
 }
 
 #[tokio::test]
@@ -662,7 +666,11 @@ async fn logout_revokes_the_session() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     let (status, _, _) = authenticated_get(&router, "/api/v1/auth/me", &token).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "revoked token must be rejected");
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "revoked token must be rejected"
+    );
 }
 
 #[tokio::test]
@@ -709,7 +717,8 @@ async fn canteen_can_access_canteen_or_admin_route_but_student_cannot() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let canteen_token = json["access_token"].as_str().unwrap().to_string();
-    let (status, _, body) = raw_authenticated_get(&router, "/roles/canteen-admin", &canteen_token).await;
+    let (status, _, body) =
+        raw_authenticated_get(&router, "/roles/canteen-admin", &canteen_token).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(String::from_utf8(body).unwrap(), "allowed");
 

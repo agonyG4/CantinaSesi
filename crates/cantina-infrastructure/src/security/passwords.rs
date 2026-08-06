@@ -6,7 +6,7 @@
 //! the blocking pool through `tokio::task::spawn_blocking`.
 
 use argon2::password_hash::{
-    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
+    PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use async_trait::async_trait;
@@ -58,7 +58,9 @@ impl PasswordService for Argon2PasswordService {
             let hash = argon2
                 .hash_password(password.expose_secret().as_bytes(), &salt)
                 .map_err(|_| PasswordError::HashingFailed)?;
-            Ok(StoredPasswordHash::new(SecretString::from(hash.to_string())))
+            Ok(StoredPasswordHash::new(SecretString::from(
+                hash.to_string(),
+            )))
         })
         .await
         .map_err(|_| PasswordError::HashingFailed)?
@@ -106,8 +108,8 @@ impl PasswordService for Argon2PasswordService {
 
 #[cfg(test)]
 mod tests {
-    use argon2::password_hash::PasswordHash;
     use argon2::Algorithm;
+    use argon2::password_hash::PasswordHash;
     use secrecy::SecretString;
 
     use cantina_application::ports::{PasswordError, PasswordService};
@@ -140,7 +142,10 @@ mod tests {
             .await
             .expect("hash must succeed");
         let ok = service
-            .verify_password(SecretString::from("wrong-password".to_string()), Some(&stored))
+            .verify_password(
+                SecretString::from("wrong-password".to_string()),
+                Some(&stored),
+            )
             .await
             .expect("verify must succeed");
         assert!(!ok, "the wrong password must not verify");
@@ -153,7 +158,10 @@ mod tests {
             "not-a-phc-string".to_string(),
         ));
         let err = service
-            .verify_password(SecretString::from("StudentDemo!2026".to_string()), Some(&stored))
+            .verify_password(
+                SecretString::from("StudentDemo!2026".to_string()),
+                Some(&stored),
+            )
             .await
             .expect_err("a malformed hash must be rejected");
         assert!(matches!(err, PasswordError::MalformedHash));
@@ -166,8 +174,7 @@ mod tests {
             .hash_password(SecretString::from("StudentDemo!2026".to_string()))
             .await
             .expect("hash must succeed");
-        let parsed =
-            PasswordHash::new(stored.as_phc()).expect("the PHC string must be parseable");
+        let parsed = PasswordHash::new(stored.as_phc()).expect("the PHC string must be parseable");
         assert_eq!(
             Algorithm::try_from(parsed.algorithm).expect("known algorithm"),
             Algorithm::Argon2id

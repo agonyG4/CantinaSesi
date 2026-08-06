@@ -103,7 +103,10 @@ fn parse_list(value: Option<String>) -> Option<Vec<String>> {
 }
 
 fn session_config_from_env() -> Result<SessionConfig, ConfigError> {
-    let idle = parse_seconds("CANTINA_SESSION_IDLE_TTL_SECONDS", SessionConfig::DEFAULT_IDLE_TIMEOUT)?;
+    let idle = parse_seconds(
+        "CANTINA_SESSION_IDLE_TTL_SECONDS",
+        SessionConfig::DEFAULT_IDLE_TIMEOUT,
+    )?;
     let absolute = parse_seconds(
         "CANTINA_SESSION_ABSOLUTE_TTL_SECONDS",
         SessionConfig::DEFAULT_ABSOLUTE_TIMEOUT,
@@ -139,7 +142,7 @@ mod tests {
 
     use cantina_application::auth::{SessionConfig, SessionConfigError};
 
-    use super::{build_session_config, session_config_from_env, Config, ConfigError};
+    use super::{Config, ConfigError, build_session_config, session_config_from_env};
 
     #[test]
     fn development_config_uses_defaults() {
@@ -200,8 +203,7 @@ mod tests {
     fn parse_seconds_value_rejects_non_numeric_values() {
         let result =
             super::parse_seconds_value("CANTINA_SESSION_IDLE_TTL_SECONDS", "not-a-number")
-                .err()
-                .expect("a non-numeric value must be rejected");
+                .expect_err("a non-numeric value must be rejected");
         assert!(matches!(
             result,
             ConfigError::InvalidTimeout { var, .. } if var == "CANTINA_SESSION_IDLE_TTL_SECONDS"

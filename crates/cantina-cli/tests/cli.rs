@@ -651,7 +651,10 @@ fn auth_login_with_password_stdin_posts_credentials_and_prints_session() {
         stdout.contains("expires_at_epoch_seconds: 1893456000"),
         "unexpected stdout: {stdout}"
     );
-    assert!(stdout.contains("ana@example.com"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("ana@example.com"),
+        "unexpected stdout: {stdout}"
+    );
 
     server.join().unwrap();
 }
@@ -695,11 +698,10 @@ fn auth_login_json_mode_prints_the_exact_api_response() {
 
 #[test]
 fn auth_login_with_empty_stdin_fails() {
-    let (url, server) = start_server_raw_request(move |_| (200, LOGIN_BODY.to_string()));
-
+    // The empty password aborts before any request, so no server is started.
     let mut child = Command::new(BIN)
         .arg("--api-url")
-        .arg(&url)
+        .arg("http://127.0.0.1:1")
         .arg("auth")
         .arg("login")
         .arg("--email")
@@ -710,19 +712,15 @@ fn auth_login_with_empty_stdin_fails() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_all(b"\n")
-        .unwrap();
+    child.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
     let output = child.wait_with_output().unwrap();
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("a password is required"), "unexpected stderr: {stderr}");
-
-    server.join().unwrap();
+    assert!(
+        stderr.contains("a password is required"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -838,11 +836,10 @@ fn auth_me_reads_token_from_environment() {
 
 #[test]
 fn auth_me_without_token_fails() {
-    let (url, server) = start_server_raw_request(move |_| (200, ME_BODY.to_string()));
-
+    // The missing token aborts before any request, so no server is started.
     let output = Command::new(BIN)
         .arg("--api-url")
-        .arg(&url)
+        .arg("http://127.0.0.1:1")
         .arg("auth")
         .arg("me")
         .output()
@@ -854,8 +851,6 @@ fn auth_me_without_token_fails() {
         stderr.contains("authentication required"),
         "unexpected stderr: {stderr}"
     );
-
-    server.join().unwrap();
 }
 
 #[test]

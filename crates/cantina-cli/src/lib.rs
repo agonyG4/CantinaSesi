@@ -249,12 +249,7 @@ pub async fn run(cli: Cli) -> Result<(), api::CliError> {
             }
             AuthSub::Refresh => {
                 let token = access_token(cli.token.as_deref())?;
-                commands::auth::refresh(
-                    &api_url(cli.api_url.as_deref()),
-                    cli.format,
-                    &token,
-                )
-                .await
+                commands::auth::refresh(&api_url(cli.api_url.as_deref()), cli.format, &token).await
             }
             AuthSub::Logout => {
                 let token = access_token(cli.token.as_deref())?;

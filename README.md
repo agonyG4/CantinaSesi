@@ -19,6 +19,7 @@ crates/
 └── cantina-cli/           Administrative HTTP client (Clap + Reqwest)
 docs/
 ├── api/catalog.md
+├── api/authentication.md
 ├── architecture/backend.md
 └── decisions/
 ```
@@ -33,6 +34,7 @@ cargo run -p cantina-cli -- products list
 cargo run -p cantina-cli -- products list --all
 cargo run -p cantina-cli -- products show product_coxinha
 cargo run -p cantina-cli -- categories list
+cargo run -p cantina-cli -- auth login --email ana@example.com
 cargo test --workspace
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -41,8 +43,22 @@ cargo clippy --workspace --all-targets -- -D warnings
 `products list` lists available products by default; `--all` (alias
 `--include-unavailable`) also lists unavailable ones.
 
-The read-only catalog endpoints are described in `docs/api/catalog.md` and in
-the OpenAPI document served by the API at `GET /api/openapi.json`.
+Authentication uses opaque bearer sessions with role-based access control. The
+in-memory seed creates four demo accounts (see
+`docs/api/authentication.md`); `auth login` prints an access token you can pass
+with `--token`:
+
+```bash
+cargo run -p cantina-cli -- auth login --email ana@example.com --password-stdin \
+  <<< "StudentDemo!2026"
+cargo run -p cantina-cli -- --token "$TOKEN" auth me
+cargo run -p cantina-cli -- --token "$TOKEN" auth refresh
+cargo run -p cantina-cli -- --token "$TOKEN" auth logout
+```
+
+The read-only catalog endpoints are described in `docs/api/catalog.md`, the
+authentication contract in `docs/api/authentication.md`, and both in the
+OpenAPI document served by the API at `GET /api/openapi.json`.
 
 ## How the pieces fit together
 

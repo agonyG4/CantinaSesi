@@ -104,8 +104,10 @@ UserRepository
 ProductRepository
 CategoryRepository
 OrderRepository
-PasswordVerifier
-TokenIssuer
+CredentialRepository
+SessionRepository
+PasswordService
+SessionTokenService
 Clock
 IdGenerator
 PickupCodeGenerator
@@ -160,7 +162,8 @@ never exposes database models. It only:
 * calls application use cases;
 * translates application errors into HTTP responses;
 * serializes response DTOs;
-* will attach authentication middleware in the future.
+* extracts the bearer access token and authenticates the principal for
+  protected routes (see `docs/api/authentication.md`).
 
 ## The CLI-to-API flow
 
@@ -221,8 +224,7 @@ as long as it keeps calling the same application services.
 * selecting a real database engine;
 * SQL migrations;
 * ORM / query builder integration;
-* real persistence for users, products, categories and orders;
-* real JWT or session storage.
+* real persistence for users, products, categories, orders and sessions.
 
 The in-memory repositories exist only to start the API, run tests and
 demonstrate dependency injection. A database is the next planned replacement

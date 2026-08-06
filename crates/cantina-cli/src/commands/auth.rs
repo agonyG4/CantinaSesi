@@ -64,7 +64,7 @@ fn read_password(email: &str, from_stdin: bool) -> Result<SecretString, CliError
             .map_err(|source| CliError::PasswordRead { source })?;
         line.trim_end_matches(['\r', '\n']).to_string()
     } else {
-        prompt_password(&format!("password for {email}: "))
+        prompt_password(format!("password for {email}: "))
             .map_err(|source| CliError::PasswordRead { source })?
     };
     if password.is_empty() {

@@ -78,10 +78,7 @@ mod tests {
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
                 "token must only use URL-safe alphabet"
             );
-            assert!(
-                !token.ends_with('='),
-                "token must not be base64 padded"
-            );
+            assert!(!token.ends_with('='), "token must not be base64 padded");
         }
     }
 
@@ -113,7 +110,10 @@ mod tests {
         let fp_first_again = service.fingerprint(&first).expect("fingerprint");
         let fp_second = service.fingerprint(&second).expect("fingerprint");
 
-        assert_eq!(fp_first, fp_first_again, "fingerprint must be deterministic");
+        assert_eq!(
+            fp_first, fp_first_again,
+            "fingerprint must be deterministic"
+        );
         assert_ne!(fp_first, fp_second, "different tokens must differ");
     }
 

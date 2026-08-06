@@ -18,7 +18,7 @@ use cantina_core::catalog::{Category, CategoryId, Product, ProductId};
 use cantina_core::orders::{Order, OrderId};
 use cantina_core::users::{User, UserId, UserRole, UserStatus};
 
-use super::{lock_store, Store, InMemoryCredentialRepository, InMemorySessionRepository};
+use super::{InMemoryCredentialRepository, InMemorySessionRepository, Store, lock_store};
 
 /// In-memory adapter for the `UserRepository` port.
 pub struct InMemoryUserRepository {
@@ -341,13 +341,8 @@ impl InMemoryRepositories {
             .hash_password(SecretString::from(password.to_string()))
             .await
             .map_err(|_| RepositoryError::new("failed to hash demo password"))?;
-        self.users.insert(User::new(
-            UserId::new(id),
-            name,
-            email,
-            role,
-            status,
-        ))?;
+        self.users
+            .insert(User::new(UserId::new(id), name, email, role, status))?;
         self.credentials.insert(&UserId::new(id), hash)?;
         Ok(())
     }

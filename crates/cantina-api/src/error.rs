@@ -185,13 +185,12 @@ impl From<ApplicationError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut response = (self.status, Json(ErrorResponse { error: self.body })).into_response();
-        if self.challenge {
-            if let Ok(value) = axum::http::HeaderValue::from_str(WWW_AUTHENTICATE_BEARER) {
-                response.headers_mut().insert(
-                    axum::http::header::WWW_AUTHENTICATE,
-                    value,
-                );
-            }
+        if self.challenge
+            && let Ok(value) = axum::http::HeaderValue::from_str(WWW_AUTHENTICATE_BEARER)
+        {
+            response
+                .headers_mut()
+                .insert(axum::http::header::WWW_AUTHENTICATE, value);
         }
         response
     }

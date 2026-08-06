@@ -6,8 +6,8 @@
 #![cfg(test)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
@@ -400,7 +400,9 @@ pub struct ManualClock {
 
 impl ManualClock {
     pub fn new(at: SystemTime) -> Self {
-        Self { now: Mutex::new(at) }
+        Self {
+            now: Mutex::new(at),
+        }
     }
 
     pub fn advance(&self, by: Duration) {

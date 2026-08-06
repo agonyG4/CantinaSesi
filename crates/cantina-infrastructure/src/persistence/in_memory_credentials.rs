@@ -7,12 +7,10 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use cantina_application::ports::{
-    CredentialRepository, RepositoryError, StoredPasswordHash,
-};
+use cantina_application::ports::{CredentialRepository, RepositoryError, StoredPasswordHash};
 use cantina_core::users::UserId;
 
-use super::{lock_store, Store};
+use super::{Store, lock_store};
 
 /// In-memory adapter for stored password hashes.
 pub struct InMemoryCredentialRepository {
@@ -28,7 +26,11 @@ impl InMemoryCredentialRepository {
     }
 
     /// Stores the password hash for a user.
-    pub fn insert(&self, user_id: &UserId, hash: StoredPasswordHash) -> Result<(), RepositoryError> {
+    pub fn insert(
+        &self,
+        user_id: &UserId,
+        hash: StoredPasswordHash,
+    ) -> Result<(), RepositoryError> {
         lock_store(&self.hashes)?.insert(user_id.as_str().to_string(), hash);
         Ok(())
     }

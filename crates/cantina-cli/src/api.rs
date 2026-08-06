@@ -261,13 +261,13 @@ impl ApiClient {
 
     /// Calls `POST /api/v1/auth/logout` with the given access token.
     pub async fn logout(&self, token: &str) -> Result<(), CliError> {
-        let url = self
-            .base_url
-            .join("/api/v1/auth/logout")
-            .map_err(|err| CliError::InvalidApiUrl {
-                url: self.base_url.to_string(),
-                message: err.to_string(),
-            })?;
+        let url =
+            self.base_url
+                .join("/api/v1/auth/logout")
+                .map_err(|err| CliError::InvalidApiUrl {
+                    url: self.base_url.to_string(),
+                    message: err.to_string(),
+                })?;
         let url_string = url.to_string();
 
         let response = self
@@ -314,9 +314,7 @@ impl ApiClient {
         query: &[(&str, String)],
         token: Option<&str>,
     ) -> Result<T, CliError> {
-        let url_string = self
-            .build_url(path, query)?
-            .to_string();
+        let url_string = self.build_url(path, query)?.to_string();
         let mut request = self.client.get(&url_string);
         if let Some(token) = token {
             request = request.bearer_auth(token);
@@ -331,9 +329,7 @@ impl ApiClient {
         body: &serde_json::Value,
         token: Option<&str>,
     ) -> Result<T, CliError> {
-        let url_string = self
-            .build_url(path, &[])?
-            .to_string();
+        let url_string = self.build_url(path, &[])?.to_string();
         let mut request = self.client.post(&url_string).json(body);
         if let Some(token) = token {
             request = request.bearer_auth(token);

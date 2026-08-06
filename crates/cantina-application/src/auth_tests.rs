@@ -12,8 +12,7 @@ use cantina_core::users::{User, UserId, UserRole, UserStatus};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::auth::{
-    AuthenticateUserCommand, AuthService, AuthorizationService, SessionConfig,
-    SessionConfigError,
+    AuthService, AuthenticateUserCommand, AuthorizationService, SessionConfig, SessionConfigError,
 };
 use crate::error::ApplicationError;
 use crate::ports::StoredPasswordHash;
@@ -157,7 +156,10 @@ async fn unknown_email_and_wrong_password_produce_identical_errors() {
     };
 
     assert!(matches!(unknown, ApplicationError::InvalidCredentials));
-    assert!(matches!(wrong_password, ApplicationError::InvalidCredentials));
+    assert!(matches!(
+        wrong_password,
+        ApplicationError::InvalidCredentials
+    ));
 }
 
 #[tokio::test]
@@ -307,7 +309,8 @@ async fn idle_expired_session_fails() {
         .login(login_cmd("ana@example.com", "StudentDemo!2026"))
         .await
         .unwrap();
-    h.clock.advance(SessionConfig::defaults().idle_timeout() + Duration::from_secs(1));
+    h.clock
+        .advance(SessionConfig::defaults().idle_timeout() + Duration::from_secs(1));
 
     let err = h
         .service
@@ -328,7 +331,8 @@ async fn absolute_expired_session_fails() {
         .login(login_cmd("ana@example.com", "StudentDemo!2026"))
         .await
         .unwrap();
-    h.clock.advance(SessionConfig::defaults().absolute_timeout() + Duration::from_secs(1));
+    h.clock
+        .advance(SessionConfig::defaults().absolute_timeout() + Duration::from_secs(1));
 
     let err = h
         .service
@@ -405,7 +409,10 @@ async fn logout_revokes_the_current_session() {
     h.service.logout(&result.access_token).await.unwrap();
 
     let stored = h.sessions.session("fp-token-0").unwrap();
-    assert!(stored.revoked_at.is_some(), "logout must revoke the session");
+    assert!(
+        stored.revoked_at.is_some(),
+        "logout must revoke the session"
+    );
 }
 
 #[tokio::test]
@@ -506,9 +513,8 @@ async fn refresh_reissues_fresh_expirations() {
         .await
         .unwrap();
 
-    let expected = fixed_time()
-        + Duration::from_secs(1200)
-        + SessionConfig::defaults().absolute_timeout();
+    let expected =
+        fixed_time() + Duration::from_secs(1200) + SessionConfig::defaults().absolute_timeout();
     let expected_epoch = expected.duration_since(UNIX_EPOCH).unwrap().as_secs();
     assert_eq!(
         second.expires_at_epoch_seconds, expected_epoch,
@@ -559,8 +565,9 @@ fn require_any_role_accepts_matching_roles() {
 #[test]
 fn student_rejected_from_canteen_or_admin_guard() {
     let student = Principal::new(UserId::new("user_1"), UserRole::Student);
-    let err = AuthorizationService::require_any_role(&student, &[UserRole::Canteen, UserRole::Admin])
-        .expect_err("a student must not satisfy the canteen/admin guard");
+    let err =
+        AuthorizationService::require_any_role(&student, &[UserRole::Canteen, UserRole::Admin])
+            .expect_err("a student must not satisfy the canteen/admin guard");
     assert!(matches!(err, ApplicationError::Forbidden));
 }
 
@@ -633,5 +640,8 @@ fn normalize_email_trims_and_lowercases_ascii() {
         crate::auth::normalize_email("  ANA@Example.COM  "),
         "ana@example.com"
     );
-    assert_eq!(crate::auth::normalize_email("test@Example.com"), "test@example.com");
+    assert_eq!(
+        crate::auth::normalize_email("test@Example.com"),
+        "test@example.com"
+    );
 }

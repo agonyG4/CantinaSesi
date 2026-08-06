@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 use cantina_application::ports::{RepositoryError, SessionRecord, SessionRepository};
 
-use super::{lock_store, Store};
+use super::{Store, lock_store};
 
 /// In-memory adapter for server-side sessions.
 pub struct InMemorySessionRepository {
@@ -36,8 +36,7 @@ impl Default for InMemorySessionRepository {
 #[async_trait]
 impl SessionRepository for InMemorySessionRepository {
     async fn save_session(&self, session: SessionRecord) -> Result<(), RepositoryError> {
-        lock_store(&self.sessions)?
-            .insert(session.token_fingerprint.clone(), session);
+        lock_store(&self.sessions)?.insert(session.token_fingerprint.clone(), session);
         Ok(())
     }
 
@@ -89,8 +88,8 @@ impl SessionRepository for InMemorySessionRepository {
 mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    use cantina_application::ports::{SessionRecord, SessionRepository};
     use cantina_core::users::UserId;
-    use cantina_application::ports::{SessionRepository, SessionRecord};
 
     use super::InMemorySessionRepository;
 
@@ -112,7 +111,9 @@ mod tests {
     #[tokio::test]
     async fn saves_and_finds_a_session_by_fingerprint() {
         let repo = InMemorySessionRepository::new();
-        repo.save_session(record("fp-1", "user_1")).await.expect("save");
+        repo.save_session(record("fp-1", "user_1"))
+            .await
+            .expect("save");
         let found = repo
             .find_session_by_fingerprint("fp-1")
             .await
@@ -133,7 +134,9 @@ mod tests {
     #[tokio::test]
     async fn revocation_is_recorded() {
         let repo = InMemorySessionRepository::new();
-        repo.save_session(record("fp-1", "user_1")).await.expect("save");
+        repo.save_session(record("fp-1", "user_1"))
+            .await
+            .expect("save");
         repo.revoke_session("fp-1", now()).await.expect("revoke");
         let found = repo
             .find_session_by_fingerprint("fp-1")
@@ -146,9 +149,13 @@ mod tests {
     #[tokio::test]
     async fn last_seen_at_is_updated() {
         let repo = InMemorySessionRepository::new();
-        repo.save_session(record("fp-1", "user_1")).await.expect("save");
+        repo.save_session(record("fp-1", "user_1"))
+            .await
+            .expect("save");
         let later = now() + Duration::from_secs(120);
-        repo.update_last_seen_at("fp-1", later).await.expect("update");
+        repo.update_last_seen_at("fp-1", later)
+            .await
+            .expect("update");
         let found = repo
             .find_session_by_fingerprint("fp-1")
             .await
@@ -160,7 +167,9 @@ mod tests {
     #[tokio::test]
     async fn rotation_revokes_old_and_stores_new() {
         let repo = InMemorySessionRepository::new();
-        repo.save_session(record("fp-old", "user_1")).await.expect("save");
+        repo.save_session(record("fp-old", "user_1"))
+            .await
+            .expect("save");
         repo.rotate_session("fp-old", record("fp-new", "user_1"), now())
             .await
             .expect("rotate");
