@@ -201,9 +201,8 @@ mod tests {
 
     #[test]
     fn parse_seconds_value_rejects_non_numeric_values() {
-        let result =
-            super::parse_seconds_value("CANTINA_SESSION_IDLE_TTL_SECONDS", "not-a-number")
-                .expect_err("a non-numeric value must be rejected");
+        let result = super::parse_seconds_value("CANTINA_SESSION_IDLE_TTL_SECONDS", "not-a-number")
+            .expect_err("a non-numeric value must be rejected");
         assert!(matches!(
             result,
             ConfigError::InvalidTimeout { var, .. } if var == "CANTINA_SESSION_IDLE_TTL_SECONDS"

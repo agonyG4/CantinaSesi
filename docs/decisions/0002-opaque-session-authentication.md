@@ -41,7 +41,9 @@ runtime. Tests use low-cost parameters; production uses the documented costs.
 
 Both return `401 INVALID_CREDENTIALS`. When no hash exists for an e-mail, a
 dummy Argon2 verification runs so response timing does not leak account
-existence.
+existence. The dummy hash is computed at most once per service instance with
+that instance's own Argon2 parameters and then reused, so an unknown login does
+not generate a fresh salt and hash every time.
 
 ### Role-based access control
 
@@ -53,17 +55,31 @@ clients never supply them.
 ### Secrets handled by `secrecy::SecretString`
 
 Passwords and access tokens are held as `SecretString` (zeroized on drop) and
-never printed, logged, or rendered in error bodies. Deriving `Debug` that would
-reveal a secret is avoided; `AuthenticationResult` deliberately drops
-`PartialEq`/`Eq` because `SecretString` does not implement them.
+never printed, logged, or rendered in error bodies. Structs that must serialize
+a token (login/refresh responses) or hold one (the CLI `--token` argument)
+still need a `Debug` for ergonomics; instead of deriving it, they implement a
+custom redacted `Debug` that prints `[REDACTED]`, so a debug representation can
+never reveal a plaintext token or password. `AuthenticationResult` deliberately
+drops `PartialEq`/`Eq` because `SecretString` does not implement them.
 
 ### Session lifecycle is server-side
 
 Sessions carry an idle TTL (default 30 min) and an absolute TTL (default 8 h),
 configurable via `CANTINA_SESSION_IDLE_TTL_SECONDS` /
 `CANTINA_SESSION_ABSOLUTE_TTL_SECONDS`. Both timeouts are validated at startup:
-zero or inverted values are rejected. `logout` deletes the record; `refresh`
-issues a new session from a still-valid one.
+zero or inverted values are rejected. `logout` marks the current session
+**revoked** (it is rejected immediately; the record may remain in storage until
+future cleanup); `refresh` rotates a still-valid session into a brand new one.
+
+Session rotation is **atomic and single-use**. The adapter holds one write lock
+while it locates the old session, verifies it exists and is not revoked,
+verifies the proposed new fingerprint is unused, then marks the old session
+revoked and inserts the new one. Any precondition failure (missing, already
+revoked, or a colliding new fingerprint) fails the whole operation and inserts
+nothing. A typed `SessionRotationError` distinguishes those cases from genuine
+storage failures; the application maps stale or already-used refresh sessions
+to the same stable `401` used for invalid access tokens, so a replay or a race
+between two refreshes never yields more than one replacement session.
 
 ### CLI never persists tokens
 
@@ -91,3 +107,27 @@ hidden prompt; `--password-stdin` reads a single line and fails on empty input.
 - Verification timing is kept uniform against account enumeration.
 - Session storage is in-memory today; the port (`SessionRepository`) is stable,
   so a real database adapter can replace it without changing the application.
+
+## Amendment (2026-08-06): single-use refresh rotation, revoke-only logout
+
+A review found that rotating an unknown, already-revoked, or already-rotated
+session still created a new one, allowing two concurrent refreshes of the same
+token to both succeed. This amendment tightens the session lifecycle:
+
+* `SessionRepository::rotate_session` is now **atomic** and returns a typed
+  `SessionRotationError`. It succeeds only when the old session exists, is not
+  revoked, and the proposed new fingerprint is unused; otherwise it fails
+  without inserting anything.
+* `logout` **revokes** the server-side session instead of deleting it. Revoked
+  records may remain until future cleanup, but revoked tokens are rejected
+  immediately and never revived.
+* The HTTP adapter authenticates each request **once** via an
+  `AuthenticatedSession` context (principal plus opaque session fingerprint)
+  and hands it to dedicated application methods; refresh/logout no longer
+  re-authenticate the raw token.
+* The unknown-user dummy verification now reuses one configured dummy Argon2
+  hash per service instance instead of hashing a fresh salt on every failed
+  login.
+
+This does not alter the original decisions (opaque sessions, Argon2id,
+RBAC, in-memory session port).

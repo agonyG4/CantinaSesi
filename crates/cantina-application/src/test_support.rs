@@ -20,7 +20,7 @@ use cantina_core::users::{User, UserId};
 use crate::ports::{
     CategoryRepository, Clock, CredentialRepository, OrderRepository, PasswordError,
     PasswordService, ProductRepository, RepositoryError, SessionRecord, SessionRepository,
-    SessionTokenService, StoredPasswordHash, TokenError, UserRepository,
+    SessionRotationError, SessionTokenService, StoredPasswordHash, TokenError, UserRepository,
 };
 
 #[derive(Default)]
@@ -208,6 +208,7 @@ impl CredentialRepository for MemCredentialRepository {
 pub struct MemSessionRepository {
     sessions: Mutex<HashMap<String, SessionRecord>>,
     fail_saves: AtomicBool,
+    find_calls: AtomicU64,
 }
 
 impl MemSessionRepository {
@@ -217,6 +218,14 @@ impl MemSessionRepository {
 
     pub fn session(&self, fingerprint: &str) -> Option<SessionRecord> {
         self.sessions.lock().unwrap().get(fingerprint).cloned()
+    }
+
+    /// Number of `find_session_by_fingerprint` calls made.
+    ///
+    /// Used by tests to prove that refresh/logout authenticate a request only
+    /// once: every authentication performs exactly one session lookup.
+    pub fn find_calls(&self) -> u64 {
+        self.find_calls.load(Ordering::SeqCst)
     }
 
     /// Makes every mutation fail, simulating a storage outage.
@@ -242,6 +251,7 @@ impl SessionRepository for MemSessionRepository {
         &self,
         fingerprint: &str,
     ) -> Result<Option<SessionRecord>, RepositoryError> {
+        self.find_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.sessions.lock().unwrap().get(fingerprint).cloned())
     }
 
@@ -274,8 +284,23 @@ impl SessionRepository for MemSessionRepository {
         old_fingerprint: &str,
         new_session: SessionRecord,
         revoked_at: SystemTime,
-    ) -> Result<(), RepositoryError> {
-        let mut sessions = self.sessions.lock().unwrap();
+    ) -> Result<(), SessionRotationError> {
+        let mut sessions = self.sessions.lock().map_err(|_| {
+            SessionRotationError::Internal("session store lock poisoned".to_string())
+        })?;
+
+        match sessions.get_mut(old_fingerprint) {
+            None => return Err(SessionRotationError::OldSessionMissing),
+            Some(old) if old.revoked_at.is_some() => {
+                return Err(SessionRotationError::OldSessionRevoked);
+            }
+            Some(_) => {}
+        }
+
+        if sessions.contains_key(&new_session.token_fingerprint) {
+            return Err(SessionRotationError::NewFingerprintCollision);
+        }
+
         if let Some(old) = sessions.get_mut(old_fingerprint) {
             old.revoked_at = Some(revoked_at);
         }

@@ -140,7 +140,7 @@ fn format_row(cells: &[&str], widths: &[usize]) -> String {
 #[cfg(test)]
 mod tests {
     use super::render_user_plain;
-    use crate::api::UserDto;
+    use crate::api::{AuthenticationResponse, UserDto};
 
     fn user() -> UserDto {
         UserDto {
@@ -150,6 +150,25 @@ mod tests {
             role: "student".to_string(),
             status: "active".to_string(),
         }
+    }
+
+    #[test]
+    fn authentication_response_debug_redacts_the_token() {
+        let response = AuthenticationResponse {
+            access_token: "known-secret-token-456".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_at_epoch_seconds: 1893456000,
+            user: user(),
+        };
+        let debug = format!("{response:?}");
+        assert!(
+            !debug.contains("known-secret-token-456"),
+            "Debug must never leak the token: {debug}"
+        );
+        assert!(
+            debug.contains("[REDACTED]"),
+            "Debug must redact the token: {debug}"
+        );
     }
 
     #[test]

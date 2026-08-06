@@ -210,6 +210,34 @@ async fn raw_authenticated_get(
     (status, headers, body.to_vec())
 }
 
+/// POSTs `/api/v1/auth/refresh` with the given bearer token.
+async fn post_refresh(
+    router: &axum::Router<()>,
+    token: &str,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/refresh")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body).unwrap()
+    };
+    (status, headers, json)
+}
+
 #[tokio::test]
 async fn root_health_returns_ok_json() {
     let (status, headers, json) = get("/health").await;
@@ -726,4 +754,214 @@ async fn canteen_can_access_canteen_or_admin_route_but_student_cannot() {
     let (status, _, json) = authenticated_get(&router, "/roles/canteen-admin", &student).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(json["error"]["code"], "FORBIDDEN");
+}
+
+#[tokio::test]
+async fn concurrent_refresh_of_the_same_token_yields_exactly_one_success() {
+    let router = router().await;
+    let token = student_token(&router).await;
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(8));
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let router = router.clone();
+        let barrier = barrier.clone();
+        let token = token.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            post_refresh(&router, &token).await
+        }));
+    }
+
+    let mut successes = 0;
+    let mut rejected = 0;
+    let mut winner: Option<String> = None;
+    for handle in handles {
+        let (status, headers, json) = handle.await.expect("task must not panic");
+        if status == StatusCode::OK {
+            successes += 1;
+            winner = json["access_token"].as_str().map(ToOwned::to_owned);
+            assert_eq!(headers["cache-control"], "no-store");
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "losing refreshes must be 401"
+            );
+            assert_eq!(json["error"]["code"], "INVALID_ACCESS_TOKEN");
+            assert!(
+                json["error"]["request_id"].is_string(),
+                "losing refreshes must carry a request id"
+            );
+            assert_eq!(
+                headers["www-authenticate"], "Bearer",
+                "losing refreshes must challenge with Bearer"
+            );
+            assert_eq!(
+                headers["content-type"], "application/json",
+                "losing refreshes must use JSON content type"
+            );
+            assert!(
+                json["access_token"].is_null(),
+                "a losing refresh must not return a token"
+            );
+            rejected += 1;
+        }
+    }
+
+    assert_eq!(successes, 1, "exactly one HTTP refresh must succeed");
+    assert_eq!(rejected, 7, "every other HTTP refresh must fail");
+
+    let winner = winner.expect("the winner must return a token");
+    let (status, _, _) = authenticated_get(&router, "/api/v1/auth/me", &winner).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "only the winning replacement token must authenticate"
+    );
+
+    let (status, _, _) = authenticated_get(&router, "/api/v1/auth/me", &token).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the original token must fail after refresh"
+    );
+}
+
+#[tokio::test]
+async fn auth_failures_carry_request_id_bearer_challenge_and_json() {
+    let router = router().await;
+
+    let cases: Vec<(String, &str)> = vec![
+        ("missing authorization".to_string(), ""),
+        ("invalid token".to_string(), "not-a-real-token"),
+    ];
+    for (label, token) in cases {
+        let (status, headers, json) = authenticated_get(&router, "/api/v1/auth/me", token).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{label} must be 401");
+        assert_eq!(headers["www-authenticate"], "Bearer", "{label}");
+        assert_eq!(headers["content-type"], "application/json", "{label}");
+        assert!(
+            json["error"]["request_id"].is_string(),
+            "{label} must carry a request id"
+        );
+    }
+
+    let (status, headers, json) = post_refresh(&router, "not-a-real-token").await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "refresh failure must be 401"
+    );
+    assert_eq!(headers["www-authenticate"], "Bearer");
+    assert_eq!(headers["content-type"], "application/json");
+    assert!(
+        json["error"]["request_id"].is_string(),
+        "refresh failure must carry a request id"
+    );
+
+    let (status, headers, json) = logout_with_token(&router, "not-a-real-token").await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "logout failure must be 401"
+    );
+    assert_eq!(headers["www-authenticate"], "Bearer");
+    assert_eq!(headers["content-type"], "application/json");
+    assert!(
+        json["error"]["request_id"].is_string(),
+        "logout failure must carry a request id"
+    );
+}
+
+#[tokio::test]
+async fn forbidden_role_carries_request_id() {
+    let router = router().await;
+    let token = student_token(&router).await;
+    let (status, headers, json) = authenticated_get(&router, "/roles/admin-only", &token).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(headers["www-authenticate"], "Bearer");
+    assert_eq!(headers["content-type"], "application/json");
+    assert!(
+        json["error"]["request_id"].is_string(),
+        "a forbidden response must carry a request id"
+    );
+}
+
+#[tokio::test]
+async fn login_body_error_carries_request_id() {
+    let router = router().await;
+    let (status, _, json) = post(
+        &router,
+        "/api/v1/auth/login",
+        serde_json::json!({ "email": "ana@example.com" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["code"], "INVALID_REQUEST_BODY");
+    assert!(
+        json["error"]["request_id"].is_string(),
+        "a 400 body error must carry a request id"
+    );
+}
+
+#[tokio::test]
+async fn openapi_auth_security_is_correct() {
+    let (_, _, json) = get("/api/openapi.json").await;
+    let paths = json["paths"].as_object().unwrap();
+
+    let login = &paths["/api/v1/auth/login"]["post"];
+    assert!(
+        login["security"].is_null()
+            || login["security"]
+                .as_array()
+                .is_some_and(|items| items.is_empty()),
+        "login must remain public"
+    );
+
+    for (path, method) in [
+        ("/api/v1/auth/refresh", "post"),
+        ("/api/v1/auth/logout", "post"),
+        ("/api/v1/auth/me", "get"),
+    ] {
+        let operation = &paths[path][method];
+        let security = operation["security"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{path} must declare a security requirement"));
+        assert!(!security.is_empty(), "{path} must require bearer security");
+        assert!(
+            security
+                .iter()
+                .any(|requirement| requirement["auth_bearer"].is_array()),
+            "{path} must reference the auth_bearer scheme"
+        );
+    }
+}
+
+/// POSTs `/api/v1/auth/logout` with the given bearer token.
+async fn logout_with_token(
+    router: &axum::Router<()>,
+    token: &str,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/logout")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body).unwrap()
+    };
+    (status, headers, json)
 }

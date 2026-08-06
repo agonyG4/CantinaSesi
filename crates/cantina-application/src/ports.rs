@@ -128,14 +128,39 @@ pub trait SessionRepository: Send + Sync {
 
     /// Atomically revokes an old session and stores a new one.
     ///
-    /// A single operation prevents a refresh from leaving inconsistent state
-    /// (for example the new session stored without the old one being revoked).
+    /// A single atomic operation prevents a refresh from leaving inconsistent
+    /// state (for example the new session stored without the old one being
+    /// revoked) and makes refresh tokens strictly single-use: exactly one
+    /// rotation of a given old session can succeed. Stale or already-used
+    /// sessions (missing, already revoked, or a colliding new fingerprint)
+    /// fail without inserting any new session.
     async fn rotate_session(
         &self,
         old_fingerprint: &str,
         new_session: SessionRecord,
         revoked_at: SystemTime,
-    ) -> Result<(), RepositoryError>;
+    ) -> Result<(), SessionRotationError>;
+}
+
+/// Failure while atomically rotating a session.
+///
+/// Internal only: the application translates stale or already-used sessions
+/// into the stable public authentication failure. `Internal` carries storage
+/// failures that must remain internal.
+#[derive(Debug, Error)]
+pub enum SessionRotationError {
+    /// The old session does not exist (never issued or already rotated away).
+    #[error("old session not found")]
+    OldSessionMissing,
+    /// The old session is already revoked.
+    #[error("old session already revoked")]
+    OldSessionRevoked,
+    /// A session already exists for the proposed new fingerprint.
+    #[error("new session fingerprint collision")]
+    NewFingerprintCollision,
+    /// The repository failed internally.
+    #[error("storage failure: {0}")]
+    Internal(String),
 }
 
 /// Hashing and verification of plain passwords against stored hashes.

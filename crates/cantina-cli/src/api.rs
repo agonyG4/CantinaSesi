@@ -63,12 +63,26 @@ pub struct UserDto {
 }
 
 /// Authentication payload returned by `login` and `refresh`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The plaintext token is serialized when rendering JSON output, but `Debug`
+/// never reveals it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthenticationResponse {
     pub access_token: String,
     pub token_type: String,
     pub expires_at_epoch_seconds: u64,
     pub user: UserDto,
+}
+
+impl std::fmt::Debug for AuthenticationResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthenticationResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_at_epoch_seconds", &self.expires_at_epoch_seconds)
+            .field("user", &self.user)
+            .finish()
+    }
 }
 
 /// Query filters sent to `GET /api/v1/products`.

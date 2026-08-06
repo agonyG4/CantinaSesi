@@ -9,7 +9,9 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 
-use cantina_application::ports::{RepositoryError, SessionRecord, SessionRepository};
+use cantina_application::ports::{
+    RepositoryError, SessionRecord, SessionRepository, SessionRotationError,
+};
 
 use super::{Store, lock_store};
 
@@ -74,8 +76,22 @@ impl SessionRepository for InMemorySessionRepository {
         old_fingerprint: &str,
         new_session: SessionRecord,
         revoked_at: SystemTime,
-    ) -> Result<(), RepositoryError> {
-        let mut sessions = lock_store(&self.sessions)?;
+    ) -> Result<(), SessionRotationError> {
+        let mut sessions = lock_store(&self.sessions)
+            .map_err(|err| SessionRotationError::Internal(err.to_string()))?;
+
+        match sessions.get_mut(old_fingerprint) {
+            None => return Err(SessionRotationError::OldSessionMissing),
+            Some(old) if old.revoked_at.is_some() => {
+                return Err(SessionRotationError::OldSessionRevoked);
+            }
+            Some(_) => {}
+        }
+
+        if sessions.contains_key(&new_session.token_fingerprint) {
+            return Err(SessionRotationError::NewFingerprintCollision);
+        }
+
         if let Some(old) = sessions.get_mut(old_fingerprint) {
             old.revoked_at = Some(revoked_at);
         }
@@ -88,7 +104,7 @@ impl SessionRepository for InMemorySessionRepository {
 mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use cantina_application::ports::{SessionRecord, SessionRepository};
+    use cantina_application::ports::{SessionRecord, SessionRepository, SessionRotationError};
     use cantina_core::users::UserId;
 
     use super::InMemorySessionRepository;
@@ -190,16 +206,169 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rotating_an_unknown_old_fingerprint_still_stores_the_new_session() {
+    async fn rotating_an_unknown_old_fingerprint_fails() {
         let repo = InMemorySessionRepository::new();
-        repo.rotate_session("fp-ghost", record("fp-new", "user_1"), now())
+        let err = repo
+            .rotate_session("fp-ghost", record("fp-new", "user_1"), now())
             .await
-            .expect("rotate");
+            .expect_err("an unknown old session must be rejected");
+        assert!(
+            matches!(err, SessionRotationError::OldSessionMissing),
+            "expected OldSessionMissing, got {err:?}"
+        );
+        let new = repo
+            .find_session_by_fingerprint("fp-new")
+            .await
+            .expect("find");
+        assert!(
+            new.is_none(),
+            "a failed rotation must not insert the proposed new session"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotating_an_already_revoked_session_fails() {
+        let repo = InMemorySessionRepository::new();
+        repo.save_session(record("fp-old", "user_1"))
+            .await
+            .expect("save");
+        repo.revoke_session("fp-old", now()).await.expect("revoke");
+
+        let err = repo
+            .rotate_session("fp-old", record("fp-new", "user_1"), now())
+            .await
+            .expect_err("a revoked session must not rotate");
+        assert!(
+            matches!(err, SessionRotationError::OldSessionRevoked),
+            "expected OldSessionRevoked, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotating_the_same_session_twice_fails_on_the_second_attempt() {
+        let repo = InMemorySessionRepository::new();
+        repo.save_session(record("fp-old", "user_1"))
+            .await
+            .expect("save");
+
+        repo.rotate_session("fp-old", record("fp-new", "user_1"), now())
+            .await
+            .expect("first rotation must succeed");
+
+        let err = repo
+            .rotate_session("fp-old", record("fp-new-2", "user_1"), now())
+            .await
+            .expect_err("a second rotation of the same session must fail");
+        assert!(
+            matches!(err, SessionRotationError::OldSessionRevoked),
+            "the second rotation must observe the old session already revoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_fingerprint_collision_fails_without_revoking_the_old_session() {
+        let repo = InMemorySessionRepository::new();
+        repo.save_session(record("fp-old", "user_1"))
+            .await
+            .expect("save");
+        repo.save_session(record("fp-new", "user_2"))
+            .await
+            .expect("save");
+
+        let err = repo
+            .rotate_session("fp-old", record("fp-new", "user_1"), now())
+            .await
+            .expect_err("a colliding new fingerprint must fail");
+        assert!(
+            matches!(err, SessionRotationError::NewFingerprintCollision),
+            "expected NewFingerprintCollision, got {err:?}"
+        );
+
+        let old = repo
+            .find_session_by_fingerprint("fp-old")
+            .await
+            .expect("find")
+            .unwrap();
+        assert!(
+            old.revoked_at.is_none(),
+            "a failed rotation must not revoke the old session"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotation_updates_old_and_new_records_atomically() {
+        let repo = InMemorySessionRepository::new();
+        repo.save_session(record("fp-old", "user_1"))
+            .await
+            .expect("save");
+
+        let outcome = repo
+            .rotate_session("fp-old", record("fp-new", "user_1"), now())
+            .await;
+        assert!(outcome.is_ok(), "the rotation must succeed");
+
+        let old = repo
+            .find_session_by_fingerprint("fp-old")
+            .await
+            .expect("find")
+            .unwrap();
+        assert_eq!(old.revoked_at, Some(now()));
         let new = repo
             .find_session_by_fingerprint("fp-new")
             .await
             .expect("find")
             .unwrap();
+        assert_eq!(new.revoked_at, None);
         assert_eq!(new.user_id, UserId::new("user_1"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_rotation_produces_exactly_one_valid_replacement() {
+        use std::sync::Arc;
+
+        let repo = Arc::new(InMemorySessionRepository::new());
+        repo.save_session(record("fp-old", "user_1"))
+            .await
+            .expect("save");
+
+        let mut handles = Vec::new();
+        for attempt in 0..8u32 {
+            let repo = repo.clone();
+            handles.push(tokio::spawn(async move {
+                let fp = format!("fp-new-{attempt}");
+                repo.rotate_session("fp-old", record(&fp, "user_1"), now())
+                    .await
+            }));
+        }
+
+        let mut successes = 0;
+        for handle in handles {
+            let result = handle.await.expect("task must not panic");
+            if result.is_ok() {
+                successes += 1;
+            }
+        }
+
+        assert_eq!(successes, 1, "exactly one concurrent rotation must win");
+
+        let old = repo
+            .find_session_by_fingerprint("fp-old")
+            .await
+            .expect("find")
+            .unwrap();
+        assert!(
+            old.revoked_at.is_some(),
+            "the original session stays revoked"
+        );
+
+        let mut active = 0;
+        for attempt in 0..8u32 {
+            let fp = format!("fp-new-{attempt}");
+            if let Some(session) = repo.find_session_by_fingerprint(&fp).await.expect("find") {
+                assert!(session.revoked_at.is_none());
+                active += 1;
+            }
+        }
+        assert_eq!(active, 1, "exactly one replacement session must exist");
     }
 }

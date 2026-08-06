@@ -25,6 +25,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use cantina_application::auth::AuthenticatedSession as AppSession;
 use cantina_application::auth::{AuthenticateUserCommand, AuthenticationResult};
 use cantina_application::users::UserDto;
 use cantina_core::auth::Principal;
@@ -32,10 +33,6 @@ use cantina_core::users::UserRole;
 
 use crate::error::{ApiError, ErrorResponse, extract_request_id_from_parts};
 use crate::state::AppState;
-
-/// Extension key under which the extractor stores the raw bearer token.
-#[derive(Clone)]
-struct RawBearerToken(SecretString);
 
 /// Login credentials.
 #[derive(Debug, Deserialize, ToSchema)]
@@ -48,7 +45,10 @@ pub struct LoginRequest {
 }
 
 /// Successful authentication payload returned by login and refresh.
-#[derive(Debug, Serialize, ToSchema)]
+///
+/// The plaintext access token is serialized in the HTTP/JSON response exactly
+/// once, but `Debug` never reveals it.
+#[derive(Serialize, ToSchema)]
 pub struct AuthenticationResponse {
     /// The opaque bearer token. Returned exactly once.
     pub access_token: String,
@@ -58,6 +58,17 @@ pub struct AuthenticationResponse {
     pub expires_at_epoch_seconds: u64,
     /// The authenticated user.
     pub user: UserResponse,
+}
+
+impl std::fmt::Debug for AuthenticationResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthenticationResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_at_epoch_seconds", &self.expires_at_epoch_seconds)
+            .field("user", &self.user)
+            .finish()
+    }
 }
 
 impl From<AuthenticationResult> for AuthenticationResponse {
@@ -93,15 +104,19 @@ impl From<UserDto> for UserResponse {
     }
 }
 
-/// Authenticated principal extracted from the `Authorization` header.
+/// Authenticated request context extracted from the `Authorization` header.
+///
+/// Authenticates the bearer token exactly once and exposes the resolved
+/// [`AppSession`] (principal plus opaque session fingerprint) so downstream
+/// handlers never re-parse or re-authenticate the raw token.
 ///
 /// Rejections are stable `ApiError`s: `AUTHENTICATION_REQUIRED` when no valid
 /// bearer token is presented, `INVALID_ACCESS_TOKEN` / `SESSION_EXPIRED` for
 /// unknown/revoked/expired sessions and `ACCOUNT_INACTIVE` for disabled
 /// accounts. Authentication failures always carry `WWW-Authenticate: Bearer`.
-pub struct AuthenticatedPrincipal(pub Principal);
+pub struct AuthenticatedSession(pub AppSession);
 
-impl FromRequestParts<AppState> for AuthenticatedPrincipal {
+impl FromRequestParts<AppState> for AuthenticatedSession {
     type Rejection = ApiError;
 
     async fn from_request_parts(
@@ -111,33 +126,12 @@ impl FromRequestParts<AppState> for AuthenticatedPrincipal {
         let request_id = extract_request_id_from_parts(parts);
         let token =
             bearer_token(&parts.headers).map_err(|err| err.with_request_id(request_id.clone()))?;
-        let principal = state
+        let session = state
             .auth
-            .authenticate_access_token(&token)
+            .authenticate_session(&token)
             .await
             .map_err(|err| ApiError::from(err).with_request_id(request_id))?;
-        parts.extensions.insert(RawBearerToken(token));
-        Ok(Self(principal))
-    }
-}
-
-/// Re-extracts the raw bearer token stashed by [`AuthenticatedPrincipal`].
-struct CurrentBearerToken(SecretString);
-
-impl FromRequestParts<AppState> for CurrentBearerToken {
-    type Rejection = ApiError;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        parts
-            .extensions
-            .get::<RawBearerToken>()
-            .map(|raw| Self(raw.0.clone()))
-            .ok_or_else(|| {
-                ApiError::from(cantina_application::ApplicationError::AuthenticationRequired)
-            })
+        Ok(Self(session))
     }
 }
 
@@ -239,10 +233,14 @@ async fn login(
 )]
 async fn refresh(
     State(state): State<AppState>,
-    AuthenticatedPrincipal(_principal): AuthenticatedPrincipal,
-    CurrentBearerToken(token): CurrentBearerToken,
+    RequestId(request_id): RequestId,
+    AuthenticatedSession(context): AuthenticatedSession,
 ) -> Result<Response, ApiError> {
-    let result = state.auth.refresh_access_token(&token).await?;
+    let result = state
+        .auth
+        .refresh_authenticated_session(&context)
+        .await
+        .map_err(|err| ApiError::from(err).with_request_id(request_id))?;
     Ok(authentication_response(result))
 }
 
@@ -259,10 +257,14 @@ async fn refresh(
 )]
 async fn logout(
     State(state): State<AppState>,
-    AuthenticatedPrincipal(_principal): AuthenticatedPrincipal,
-    CurrentBearerToken(token): CurrentBearerToken,
+    RequestId(request_id): RequestId,
+    AuthenticatedSession(context): AuthenticatedSession,
 ) -> Result<StatusCode, ApiError> {
-    state.auth.logout(&token).await?;
+    state
+        .auth
+        .logout_authenticated_session(&context)
+        .await
+        .map_err(|err| ApiError::from(err).with_request_id(request_id))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -279,9 +281,14 @@ async fn logout(
 )]
 async fn me(
     State(state): State<AppState>,
-    AuthenticatedPrincipal(principal): AuthenticatedPrincipal,
+    RequestId(request_id): RequestId,
+    AuthenticatedSession(context): AuthenticatedSession,
 ) -> Result<Json<UserResponse>, ApiError> {
-    let user = state.auth.get_current_user(&principal).await?;
+    let user = state
+        .auth
+        .get_current_user(&context.principal)
+        .await
+        .map_err(|err| ApiError::from(err).with_request_id(request_id))?;
     Ok(Json(user.into()))
 }
 
@@ -328,23 +335,57 @@ pub fn test_only_router() -> Router<AppState> {
 }
 
 async fn require_canteen_or_admin(
-    AuthenticatedPrincipal(principal): AuthenticatedPrincipal,
+    RequestId(request_id): RequestId,
+    AuthenticatedSession(context): AuthenticatedSession,
 ) -> Result<&'static str, ApiError> {
-    require_any_role(&principal, &[UserRole::Canteen, UserRole::Admin])?;
+    require_any_role(&context.principal, &[UserRole::Canteen, UserRole::Admin])
+        .map_err(|err| err.with_request_id(request_id))?;
     Ok("allowed")
 }
 
 async fn require_admin_only(
-    AuthenticatedPrincipal(principal): AuthenticatedPrincipal,
+    RequestId(request_id): RequestId,
+    AuthenticatedSession(context): AuthenticatedSession,
 ) -> Result<&'static str, ApiError> {
-    require_any_role(&principal, &[UserRole::Admin])?;
+    require_any_role(&context.principal, &[UserRole::Admin])
+        .map_err(|err| err.with_request_id(request_id))?;
     Ok("allowed")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::bearer_token;
+    use super::{AuthenticationResponse, UserResponse, bearer_token};
     use secrecy::ExposeSecret;
+
+    #[test]
+    fn authentication_response_debug_redacts_the_token() {
+        let response = AuthenticationResponse {
+            access_token: "known-secret-token-789".to_string(),
+            token_type: "Bearer",
+            expires_at_epoch_seconds: 1893456000,
+            user: UserResponse {
+                id: "user_student_1".to_string(),
+                name: "Ana Silva".to_string(),
+                email: "ana@example.com".to_string(),
+                role: "student".to_string(),
+                status: "active".to_string(),
+            },
+        };
+        let debug = format!("{response:?}");
+        assert!(
+            !debug.contains("known-secret-token-789"),
+            "Debug must never leak the token: {debug}"
+        );
+        assert!(
+            debug.contains("[REDACTED]"),
+            "Debug must redact the token: {debug}"
+        );
+        let json = serde_json::to_string(&response).expect("serialize");
+        assert!(
+            json.contains("known-secret-token-789"),
+            "serialization must still include the token"
+        );
+    }
 
     #[test]
     fn bearer_scheme_is_case_insensitive() {

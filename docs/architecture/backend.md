@@ -192,7 +192,7 @@ graph TD
     CLI["cantina-cli"] -. "HTTP" .-> API
     API --> APP["cantina-application"]
     APP --> CORE["cantina-core"]
-    APP -->|ports| INFRA["cantina-infrastructure"]
+    INFRA["cantina-infrastructure"] -->|"implements ports"| APP
 ```
 
 Adding a frontend is a client-side change. No crate in this workspace changes.

@@ -16,6 +16,34 @@ use crate::output::OutputFormat;
 /// Development fallback API base URL.
 pub const DEFAULT_API_URL: &str = "http://127.0.0.1:8080";
 
+/// A command-line secret value whose `Debug` never reveals the plaintext.
+///
+/// Used for the global `--token` argument so a derived `Debug` on [`Cli`] can
+/// never leak the bearer token into logs, error messages or help text.
+#[derive(Clone, Default)]
+pub struct SecretArg(Option<secrecy::SecretString>);
+
+impl SecretArg {
+    /// The underlying secret, if the flag was supplied.
+    pub fn as_secret(&self) -> Option<&secrecy::SecretString> {
+        self.0.as_ref()
+    }
+}
+
+impl std::fmt::Debug for SecretArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretArg([REDACTED])")
+    }
+}
+
+impl std::str::FromStr for SecretArg {
+    type Err = std::convert::Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Some(secrecy::SecretString::from(value.to_string()))))
+    }
+}
+
 /// Root command-line interface.
 #[derive(Debug, Parser)]
 #[command(name = "cantina", version, about = "CantinaSesi administrative client")]
@@ -27,9 +55,9 @@ pub struct Cli {
     /// Access token for authenticated commands.
     ///
     /// Takes precedence over `CANTINA_ACCESS_TOKEN`. The value is held in
-    /// memory only and never persisted.
+    /// memory only, never persisted, and is redacted from any `Debug` output.
     #[arg(long, global = true)]
-    pub token: Option<String>,
+    pub token: Option<SecretArg>,
 
     /// Output format.
     #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Human)]
@@ -184,9 +212,12 @@ fn api_url(cli_value: Option<&str>) -> String {
 ///
 /// Precedence: explicit `--token`, then `CANTINA_ACCESS_TOKEN`. The token is
 /// held in memory only and never persisted.
-fn access_token(cli_value: Option<&str>) -> Result<secrecy::SecretString, api::CliError> {
+fn access_token(
+    cli_value: Option<&secrecy::SecretString>,
+) -> Result<secrecy::SecretString, api::CliError> {
+    use secrecy::ExposeSecret;
     match cli_value {
-        Some(value) if !value.is_empty() => Ok(secrecy::SecretString::from(value.to_string())),
+        Some(value) if !value.expose_secret().is_empty() => Ok(value.clone()),
         Some(_) => Err(api::CliError::MissingAccessToken),
         None => match std::env::var("CANTINA_ACCESS_TOKEN") {
             Ok(value) if !value.is_empty() => Ok(secrecy::SecretString::from(value)),
@@ -244,15 +275,15 @@ pub async fn run(cli: Cli) -> Result<(), api::CliError> {
                 .await
             }
             AuthSub::Me => {
-                let token = access_token(cli.token.as_deref())?;
+                let token = access_token(cli.token.as_ref().and_then(SecretArg::as_secret))?;
                 commands::auth::me(&api_url(cli.api_url.as_deref()), cli.format, &token).await
             }
             AuthSub::Refresh => {
-                let token = access_token(cli.token.as_deref())?;
+                let token = access_token(cli.token.as_ref().and_then(SecretArg::as_secret))?;
                 commands::auth::refresh(&api_url(cli.api_url.as_deref()), cli.format, &token).await
             }
             AuthSub::Logout => {
-                let token = access_token(cli.token.as_deref())?;
+                let token = access_token(cli.token.as_ref().and_then(SecretArg::as_secret))?;
                 commands::auth::logout(&api_url(cli.api_url.as_deref()), &token).await
             }
         },
@@ -263,7 +294,30 @@ pub async fn run(cli: Cli) -> Result<(), api::CliError> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_api_url;
+    use super::{Cli, Command, SecretArg, resolve_api_url};
+    use crate::output::OutputFormat;
+
+    #[test]
+    fn cli_debug_redacts_the_global_token() {
+        use secrecy::SecretString;
+        let cli = Cli {
+            api_url: None,
+            token: Some(SecretArg(Some(SecretString::from(
+                "known-secret-token-123".to_string(),
+            )))),
+            format: OutputFormat::Human,
+            command: Command::Version,
+        };
+        let debug = format!("{cli:?}");
+        assert!(
+            !debug.contains("known-secret-token-123"),
+            "Debug must never leak the token: {debug}"
+        );
+        assert!(
+            debug.contains("[REDACTED]"),
+            "Debug must redact the token: {debug}"
+        );
+    }
 
     #[test]
     fn cli_flag_wins_over_environment() {

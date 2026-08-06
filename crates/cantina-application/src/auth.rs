@@ -45,6 +45,34 @@ pub struct AuthenticationResult {
     pub user: UserDto,
 }
 
+/// Opaque application-safe reference to a live server-side session.
+///
+/// Holds only the token fingerprint; it never contains (or logs) the
+/// plaintext bearer token. The application uses it to rotate or revoke the
+/// session without re-authenticating the raw token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionFingerprint(String);
+
+impl SessionFingerprint {
+    /// The fingerprint string keying the server-side session record.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// An authenticated request context returned once by a single authentication.
+///
+/// Produced exactly once per request by the `authenticate_session` use case so
+/// downstream operations (refresh, logout, current-user lookup) never re-parse
+/// or re-authenticate the raw access token.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedSession {
+    /// The resolved principal.
+    pub principal: Principal,
+    /// The fingerprint of the authenticated server-side session.
+    pub session_fingerprint: SessionFingerprint,
+}
+
 /// Validated server-side session timeouts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionConfig {
@@ -249,10 +277,42 @@ impl AuthService {
             .tokens
             .fingerprint(token)
             .map_err(|_| ApplicationError::TokenGeneration)?;
+        self.authenticate_with_fingerprint(&fingerprint).await
+    }
 
+    /// Authenticates an opaque bearer token exactly once and returns the
+    /// resolved [`AuthenticatedSession`].
+    ///
+    /// This is the single authentication performed by the HTTP adapter per
+    /// request. Downstream use cases (`refresh_authenticated_session`,
+    /// `logout_authenticated_session`, `get_current_user`) consume the
+    /// returned context and never re-authenticate the raw token.
+    pub async fn authenticate_session(
+        &self,
+        token: &SecretString,
+    ) -> Result<AuthenticatedSession, ApplicationError> {
+        let fingerprint = self
+            .tokens
+            .fingerprint(token)
+            .map_err(|_| ApplicationError::TokenGeneration)?;
+        let principal = self.authenticate_with_fingerprint(&fingerprint).await?;
+        Ok(AuthenticatedSession {
+            principal,
+            session_fingerprint: SessionFingerprint(fingerprint),
+        })
+    }
+
+    /// Core authentication against an already-fingerprinted session.
+    ///
+    /// Enforces every server-side invalidation rule and refreshes
+    /// `last_seen_at` on success.
+    async fn authenticate_with_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Principal, ApplicationError> {
         let session = self
             .sessions
-            .find_session_by_fingerprint(&fingerprint)
+            .find_session_by_fingerprint(fingerprint)
             .await?
             .ok_or(ApplicationError::InvalidAccessToken)?;
 
@@ -282,25 +342,23 @@ impl AuthService {
             return Err(ApplicationError::AccountInactive);
         }
 
-        self.sessions.update_last_seen_at(&fingerprint, now).await?;
+        self.sessions.update_last_seen_at(fingerprint, now).await?;
 
         Ok(Principal::new(session.user_id, user.role()))
     }
 
-    /// `refresh` use case: rotates the current session into a brand new one.
+    /// `refresh` use case: rotates the already-authenticated session into a
+    /// brand new one.
     ///
     /// The old session is atomically revoked and the new session receives
-    /// fresh idle and absolute expirations.
-    pub async fn refresh_access_token(
+    /// fresh idle and absolute expirations. The context was produced by
+    /// [`Self::authenticate_session`], so this performs no duplicate
+    /// authentication. A stale or already-used session fails with the stable
+    /// public authentication error.
+    pub async fn refresh_authenticated_session(
         &self,
-        token: &SecretString,
+        context: &AuthenticatedSession,
     ) -> Result<AuthenticationResult, ApplicationError> {
-        let principal = self.authenticate_access_token(token).await?;
-        let old_fingerprint = self
-            .tokens
-            .fingerprint(token)
-            .map_err(|_| ApplicationError::TokenGeneration)?;
-
         let new_token = self
             .tokens
             .generate_token()
@@ -317,23 +375,23 @@ impl AuthService {
 
         let new_session = SessionRecord {
             token_fingerprint: new_fingerprint,
-            user_id: principal.user_id().clone(),
+            user_id: context.principal.user_id().clone(),
             created_at: now,
             last_seen_at: now,
             absolute_expires_at,
             revoked_at: None,
         };
         self.sessions
-            .rotate_session(&old_fingerprint, new_session, now)
+            .rotate_session(context.session_fingerprint.as_str(), new_session, now)
             .await?;
 
         let user = self
             .users
-            .find_user_by_id(principal.user_id())
+            .find_user_by_id(context.principal.user_id())
             .await?
             .ok_or_else(|| ApplicationError::NotFound {
                 resource: "user",
-                id: principal.user_id().to_string(),
+                id: context.principal.user_id().to_string(),
             })?;
 
         Ok(AuthenticationResult {
@@ -343,16 +401,38 @@ impl AuthService {
         })
     }
 
-    /// `logout` use case: revokes exactly the current session.
-    pub async fn logout(&self, token: &SecretString) -> Result<(), ApplicationError> {
-        let _principal = self.authenticate_access_token(token).await?;
-        let fingerprint = self
-            .tokens
-            .fingerprint(token)
-            .map_err(|_| ApplicationError::TokenGeneration)?;
+    /// `refresh` use case from a raw token, for callers without an
+    /// already-authenticated context. Authenticates the token once and then
+    /// rotates the resulting session.
+    pub async fn refresh_access_token(
+        &self,
+        token: &SecretString,
+    ) -> Result<AuthenticationResult, ApplicationError> {
+        let context = self.authenticate_session(token).await?;
+        self.refresh_authenticated_session(&context).await
+    }
+
+    /// `logout` use case: revokes the already-authenticated session.
+    ///
+    /// The context was produced by [`Self::authenticate_session`], so this
+    /// performs no duplicate authentication.
+    pub async fn logout_authenticated_session(
+        &self,
+        context: &AuthenticatedSession,
+    ) -> Result<(), ApplicationError> {
         let now = self.clock.now();
-        self.sessions.revoke_session(&fingerprint, now).await?;
+        self.sessions
+            .revoke_session(context.session_fingerprint.as_str(), now)
+            .await?;
         Ok(())
+    }
+
+    /// `logout` use case from a raw token, for callers without an
+    /// already-authenticated context. Authenticates the token once and then
+    /// revokes the resulting session.
+    pub async fn logout(&self, token: &SecretString) -> Result<(), ApplicationError> {
+        let context = self.authenticate_session(token).await?;
+        self.logout_authenticated_session(&context).await
     }
 
     /// `GetCurrentUser` use case: resolves a [`Principal`] to its [`User`].

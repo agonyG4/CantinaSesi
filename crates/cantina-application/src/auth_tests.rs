@@ -15,7 +15,7 @@ use crate::auth::{
     AuthService, AuthenticateUserCommand, AuthorizationService, SessionConfig, SessionConfigError,
 };
 use crate::error::ApplicationError;
-use crate::ports::StoredPasswordHash;
+use crate::ports::{SessionRepository, StoredPasswordHash};
 use crate::test_support::{
     FakePasswordMode, FakePasswordService, FakeTokenService, ManualClock, MemCredentialRepository,
     MemSessionRepository, MemUserRepository,
@@ -519,6 +519,209 @@ async fn refresh_reissues_fresh_expirations() {
     assert_eq!(
         second.expires_at_epoch_seconds, expected_epoch,
         "the refreshed session must receive a fresh absolute expiration"
+    );
+}
+
+#[tokio::test]
+async fn second_refresh_of_the_same_session_fails() {
+    let h = harness(FakePasswordMode::Accept);
+    seed_active_student(&h);
+
+    let first = h
+        .service
+        .login(login_cmd("ana@example.com", "StudentDemo!2026"))
+        .await
+        .unwrap();
+    let _second = h
+        .service
+        .refresh_access_token(&first.access_token)
+        .await
+        .expect("first refresh must succeed");
+
+    // The original token's session is now revoked; a second rotation attempt
+    // with the same token must fail.
+    let err = h
+        .service
+        .refresh_access_token(&first.access_token)
+        .await
+        .expect_err("a second rotation of the same session must fail");
+    assert!(
+        matches!(err, ApplicationError::InvalidAccessToken),
+        "a stale refresh token must map to the stable authentication failure"
+    );
+}
+
+#[tokio::test]
+async fn rotation_conflict_maps_to_stable_authentication_failure() {
+    let h = harness(FakePasswordMode::Accept);
+    seed_active_student(&h);
+
+    let first = h
+        .service
+        .login(login_cmd("ana@example.com", "StudentDemo!2026"))
+        .await
+        .unwrap();
+    let context = h
+        .service
+        .authenticate_session(&first.access_token)
+        .await
+        .expect("authenticate session");
+
+    // Revoke the session behind the context so the rotation conflicts.
+    SessionRepository::revoke_session(
+        &*h.sessions,
+        context.session_fingerprint.as_str(),
+        fixed_time(),
+    )
+    .await
+    .expect("revoke");
+
+    let err = h
+        .service
+        .refresh_authenticated_session(&context)
+        .await
+        .expect_err("a revoked session must not rotate");
+    assert!(
+        matches!(err, ApplicationError::InvalidAccessToken),
+        "a rotation conflict must map to the stable authentication failure"
+    );
+
+    assert!(
+        h.sessions.session("fp-token-1").is_none(),
+        "a failed rotation must not store a new session"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_refresh_of_the_same_token_produces_exactly_one_success() {
+    let h = Arc::new(harness(FakePasswordMode::Accept));
+    seed_active_student(&h);
+
+    let first = h
+        .service
+        .login(login_cmd("ana@example.com", "StudentDemo!2026"))
+        .await
+        .unwrap();
+    let original = first.access_token.clone();
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(8));
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let h = h.clone();
+        let barrier = barrier.clone();
+        let original = original.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            h.service.refresh_access_token(&original).await
+        }));
+    }
+
+    let mut successes = 0;
+    let mut failures = 0;
+    let mut winner_token: Option<SecretString> = None;
+    for handle in handles {
+        match handle.await.expect("task must not panic") {
+            Ok(result) => {
+                successes += 1;
+                winner_token = Some(result.access_token);
+            }
+            Err(err) => {
+                assert!(
+                    matches!(err, ApplicationError::InvalidAccessToken),
+                    "every losing refresh must map to the stable auth failure"
+                );
+                failures += 1;
+            }
+        }
+    }
+
+    assert_eq!(successes, 1, "exactly one concurrent refresh must succeed");
+    assert_eq!(failures, 7, "every other concurrent refresh must fail");
+
+    let winner = winner_token.expect("the winner must return a token");
+    let principal = h
+        .service
+        .authenticate_access_token(&winner)
+        .await
+        .expect("the winning replacement token must authenticate");
+    assert_eq!(principal.user_id().as_str(), "user_1");
+
+    let err = h
+        .service
+        .authenticate_access_token(&original)
+        .await
+        .expect_err("the original token must fail after refresh");
+    assert!(matches!(err, ApplicationError::InvalidAccessToken));
+
+    let mut active_sessions = 0;
+    for index in 0..9 {
+        if let Some(session) = h.sessions.session(&format!("fp-token-{index}"))
+            && session.revoked_at.is_none()
+        {
+            active_sessions += 1;
+        }
+    }
+    assert_eq!(
+        active_sessions, 1,
+        "exactly one active replacement session must exist"
+    );
+}
+
+#[tokio::test]
+async fn refresh_and_logout_authenticate_only_once() {
+    let h = harness(FakePasswordMode::Accept);
+    seed_active_student(&h);
+
+    let first = h
+        .service
+        .login(login_cmd("ana@example.com", "StudentDemo!2026"))
+        .await
+        .unwrap();
+
+    // One authentication performs exactly one session lookup.
+    let context = h
+        .service
+        .authenticate_session(&first.access_token)
+        .await
+        .expect("authenticate session");
+    assert_eq!(
+        h.sessions.find_calls(),
+        1,
+        "authenticating a request must perform exactly one session lookup"
+    );
+
+    // Refresh must not perform another lookup: it rotates the existing session.
+    let _refreshed = h
+        .service
+        .refresh_authenticated_session(&context)
+        .await
+        .expect("refresh must succeed");
+    assert_eq!(
+        h.sessions.find_calls(),
+        1,
+        "refresh must not re-authenticate the access token"
+    );
+
+    // A fresh context (new login) then logout must not perform a second lookup.
+    let second = h
+        .service
+        .login(login_cmd("ana@example.com", "StudentDemo!2026"))
+        .await
+        .unwrap();
+    let context = h
+        .service
+        .authenticate_session(&second.access_token)
+        .await
+        .expect("authenticate session");
+    let calls_before_logout = h.sessions.find_calls();
+    h.service
+        .logout_authenticated_session(&context)
+        .await
+        .expect("logout must succeed");
+    assert_eq!(
+        h.sessions.find_calls(),
+        calls_before_logout,
+        "logout must not re-authenticate the access token"
     );
 }
 

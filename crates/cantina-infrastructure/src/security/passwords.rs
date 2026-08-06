@@ -11,14 +11,21 @@ use argon2::password_hash::{
 use argon2::{Algorithm, Argon2, Params, Version};
 use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
+use std::sync::Mutex;
 use tokio::task::spawn_blocking;
 
 use cantina_application::ports::{PasswordError, PasswordService, StoredPasswordHash};
 
 /// Argon2id password hasher matching the documented production parameters.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Argon2PasswordService {
     params: Params,
+    /// Cached dummy PHC hash used for the constant-time unknown-user path.
+    ///
+    /// Computed at most once per service instance using this instance's own
+    /// Argon2 parameters; subsequent failed logins reuse it instead of
+    /// generating a fresh salt and hash each time.
+    dummy_hash: Mutex<Option<StoredPasswordHash>>,
 }
 
 impl Argon2PasswordService {
@@ -26,6 +33,7 @@ impl Argon2PasswordService {
     pub fn new() -> Self {
         Self {
             params: Params::default(),
+            dummy_hash: Mutex::new(None),
         }
     }
 
@@ -35,6 +43,7 @@ impl Argon2PasswordService {
     pub fn low_cost() -> Self {
         Self {
             params: Params::new(8 * 1024, 1, 1, Some(32)).expect("valid low-cost parameters"),
+            dummy_hash: Mutex::new(None),
         }
     }
 }
@@ -86,23 +95,66 @@ impl PasswordService for Argon2PasswordService {
                 .map_err(|_| PasswordError::VerificationFailed)?
             }
             None => {
-                // Dummy verification: hash a throwaway password and verify the
-                // supplied one against it. The work performed matches a real
-                // verification so unknown users are not distinguishable by
-                // timing, and the result is always false.
+                // Dummy verification: verify the supplied password against a
+                // reusable dummy hash computed with this instance's own
+                // parameters. The dummy hash is created at most once and then
+                // cached, so unknown users are not distinguishable by timing
+                // and no fresh salt/hash is generated on every failed login.
+                let params = self.params.clone();
+                let dummy = self.dummy_hash().await?;
                 spawn_blocking(move || {
-                    let salt = SaltString::generate(&mut OsRng);
-                    let argon2 = Argon2::default();
-                    let dummy = argon2
-                        .hash_password(b"cantina-dummy-verification", &salt)
+                    let parsed = PasswordHash::new(dummy.as_phc())
                         .map_err(|_| PasswordError::VerificationFailed)?;
-                    let _ = argon2.verify_password(password.expose_secret().as_bytes(), &dummy);
+                    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+                    let _ = argon2.verify_password(password.expose_secret().as_bytes(), &parsed);
                     Ok(false)
                 })
                 .await
                 .map_err(|_| PasswordError::VerificationFailed)?
             }
         }
+    }
+}
+
+impl Argon2PasswordService {
+    /// Returns the cached dummy hash, computing it once if needed.
+    ///
+    /// Uses this service instance's own parameters so the work performed by
+    /// the unknown-user path matches a real verification in both production
+    /// and low-cost test configurations.
+    async fn dummy_hash(&self) -> Result<StoredPasswordHash, PasswordError> {
+        {
+            let cached = self
+                .dummy_hash
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(hash) = cached.as_ref() {
+                return Ok(hash.clone());
+            }
+        }
+
+        let params = self.params.clone();
+        let computed = spawn_blocking(move || {
+            let salt = SaltString::generate(&mut OsRng);
+            let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+            let hash = argon2
+                .hash_password(b"cantina-dummy-verification", &salt)
+                .map_err(|_| PasswordError::VerificationFailed)?;
+            Ok::<StoredPasswordHash, PasswordError>(StoredPasswordHash::new(SecretString::from(
+                hash.to_string(),
+            )))
+        })
+        .await
+        .map_err(|_| PasswordError::VerificationFailed)??;
+
+        let mut cached = self
+            .dummy_hash
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cached.is_none() {
+            *cached = Some(computed.clone());
+        }
+        Ok(computed)
     }
 }
 
@@ -211,5 +263,68 @@ mod tests {
             .await
             .expect("dummy verification must succeed");
         assert!(!ok, "the dummy verification must always report a mismatch");
+    }
+
+    #[tokio::test]
+    async fn dummy_hash_is_reused_across_unknown_logins() {
+        let service = Argon2PasswordService::low_cost();
+        for _ in 0..5 {
+            let ok = service
+                .verify_password(SecretString::from("whatever".to_string()), None)
+                .await
+                .expect("dummy verification must succeed");
+            assert!(!ok);
+        }
+
+        let first = {
+            let guard = service.dummy_hash.lock().expect("lock");
+            guard
+                .as_ref()
+                .expect("a dummy hash must be cached after the first unknown login")
+                .as_phc()
+                .to_string()
+        };
+        let again = service
+            .verify_password(SecretString::from("whatever-else".to_string()), None)
+            .await
+            .expect("dummy verification must succeed");
+        assert!(!again);
+        let cached = {
+            let guard = service.dummy_hash.lock().expect("lock");
+            guard
+                .as_ref()
+                .expect("the dummy hash must remain cached")
+                .as_phc()
+                .to_string()
+        };
+        assert_eq!(
+            first, cached,
+            "the dummy hash must be computed once and reused, not regenerated"
+        );
+    }
+
+    #[tokio::test]
+    async fn dummy_hash_respects_the_configured_test_parameters() {
+        let service = Argon2PasswordService::low_cost();
+        let _ = service
+            .verify_password(SecretString::from("whatever".to_string()), None)
+            .await
+            .expect("dummy verification must succeed");
+
+        let guard = service.dummy_hash.lock().expect("lock");
+        let cached = guard.as_ref().expect("a dummy hash must be cached");
+        let parsed = PasswordHash::new(cached.as_phc()).expect("the dummy PHC must parse");
+        let argon2 = argon2::Params::try_from(&parsed).expect("the dummy PHC must carry params");
+        assert_eq!(
+            argon2.m_cost(),
+            8 * 1024,
+            "the dummy hash must use the service's low-cost memory parameter"
+        );
+        assert_eq!(
+            argon2.t_cost(),
+            1,
+            "the dummy hash must use the service's iteration parameter"
+        );
+        assert!(parsed.salt.is_some(), "the dummy hash must embed a salt");
     }
 }

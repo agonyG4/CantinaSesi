@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::ports::RepositoryError;
+use crate::ports::{RepositoryError, SessionRotationError};
 
 /// Error returned by application use cases.
 ///
@@ -73,6 +73,19 @@ pub enum ApplicationError {
 impl From<RepositoryError> for ApplicationError {
     fn from(err: RepositoryError) -> Self {
         Self::Storage(err.to_string())
+    }
+}
+
+impl From<SessionRotationError> for ApplicationError {
+    fn from(err: SessionRotationError) -> Self {
+        match err {
+            // Stale or already-used refresh sessions must look exactly like an
+            // invalid access token; internal repository failures stay internal.
+            SessionRotationError::OldSessionMissing
+            | SessionRotationError::OldSessionRevoked
+            | SessionRotationError::NewFingerprintCollision => Self::InvalidAccessToken,
+            SessionRotationError::Internal(message) => Self::Storage(message),
+        }
     }
 }
 

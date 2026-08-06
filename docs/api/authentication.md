@@ -32,6 +32,13 @@ is absent, keeping response timing uniform.
 
 ## Endpoints
 
+| Endpoint | Visibility |
+| --- | --- |
+| `POST /api/v1/auth/login` | Public |
+| `POST /api/v1/auth/refresh` | Bearer-protected |
+| `POST /api/v1/auth/logout` | Bearer-protected |
+| `GET /api/v1/auth/me` | Bearer-protected |
+
 ### `POST /api/v1/auth/login`
 
 Authenticates with e-mail and password.
@@ -77,13 +84,22 @@ logged.
 Issues a new session from a currently valid bearer token, so long-lived clients
 can rotate tokens. Requires `Authorization: Bearer <token>`.
 
+Rotation is **atomic and single-use**: the presented session is revoked and a
+replacement session is created in one operation. If two refresh requests race
+with the same token, exactly one succeeds; the other is rejected with the same
+`401 INVALID_ACCESS_TOKEN` as an invalid token, and the losing request returns
+no token. A stale or already-rotated token therefore never yields a second
+replacement session.
+
 Returns the same `200` payload as `login`.
 
 ### `POST /api/v1/auth/logout`
 
-Revokes the current session. Requires `Authorization: Bearer <token>`.
+Revokes the current server-side session. Requires `Authorization: Bearer <token>`.
 
-Response `204` with no body. The presented token is immediately invalid.
+Response `204` with no body. The presented token is immediately rejected. The
+revoked session record may remain in storage until future cleanup; it is never
+reused or revived.
 
 ### `GET /api/v1/auth/me`
 

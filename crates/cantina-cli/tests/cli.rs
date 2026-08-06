@@ -929,3 +929,98 @@ fn auth_logout_prints_logged_out() {
 
     server.join().unwrap();
 }
+
+#[test]
+fn auth_failure_output_never_contains_the_token_or_password() {
+    let body = r#"{"error":{"code":"INVALID_CREDENTIALS","message":"invalid email or password","request_id":"req-7"}}"#;
+    let (url, server) = start_server_raw_request(move |_| (401, body.to_string()));
+
+    let secret_password = "CorrectHorseBatteryStaple!99";
+    let mut child = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("auth")
+        .arg("login")
+        .arg("--email")
+        .arg("ana@example.com")
+        .arg("--password-stdin")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(format!("{secret_password}\n").as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains(secret_password),
+        "error output must never contain the plaintext password: {stderr}"
+    );
+    server.join().unwrap();
+
+    let (url, server) = start_server_raw_request(move |_| (401, body.to_string()));
+    let secret_token = "super-secret-opaque-token-xyz";
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg(secret_token)
+        .arg("auth")
+        .arg("me")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains(secret_token),
+        "error output must never contain the plaintext token: {stderr}"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn auth_commands_do_not_create_a_token_persistence_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "cantina-cli-nopersist-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let (url, server) = start_server_raw_request(move |_| (200, ME_BODY.to_string()));
+    let output = Command::new(BIN)
+        .current_dir(&dir)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("auth")
+        .arg("me")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("temp dir must exist")
+        .collect();
+    assert!(
+        entries.is_empty(),
+        "an authenticated command must not create any token persistence file"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    server.join().unwrap();
+}
