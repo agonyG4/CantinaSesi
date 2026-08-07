@@ -1,9 +1,9 @@
 //! Authentication endpoints.
 //!
-//! `POST /login` and `POST /refresh` are public; `POST /logout` and
-//! `GET /me` require a valid bearer access token. The `AuthenticatedPrincipal`
-//! extractor translates the `Authorization: Bearer <token>` header into an
-//! application `Principal`, enforcing every server-side session rule.
+//! `POST /login` is public. `POST /refresh`, `POST /logout` and `GET /me`
+//! require a valid bearer access token. The `AuthenticatedSession` extractor
+//! translates the `Authorization: Bearer <token>` header into an application
+//! `Principal`, enforcing every server-side session rule.
 //!
 //! Secrets are handled carefully here:
 //! * the plaintext bearer token exists only transiently inside the extractor
@@ -167,7 +167,7 @@ fn bearer_token(headers: &HeaderMap) -> Result<SecretString, ApiError> {
 }
 
 /// Request identifier extracted from the extensions set by the middleware.
-pub struct RequestId(Option<String>);
+pub struct RequestId(pub Option<String>);
 
 impl FromRequestParts<AppState> for RequestId {
     type Rejection = std::convert::Infallible;

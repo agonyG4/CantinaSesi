@@ -48,6 +48,7 @@ pub fn build_state(repositories: InMemoryRepositories, config: &Config) -> AppSt
         Arc::new(CatalogService::new(
             repositories.products.clone(),
             repositories.categories.clone(),
+            ids.clone(),
         )),
         Arc::new(OrderService::new(
             repositories.orders.clone(),

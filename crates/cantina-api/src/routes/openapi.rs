@@ -7,9 +7,14 @@ use axum::Json;
 use utoipa::OpenApi;
 
 use super::auth::{AuthenticationResponse, LoginRequest, UserResponse};
-use super::categories::{CategoryListResponse, CategoryResponse};
+use super::categories::{
+    CategoryListResponse, CategoryResponse, CreateCategoryRequest, UpdateCategoryRequest,
+};
 use super::health::HealthResponse;
-use super::products::{ListProductsParams, ProductListResponse, ProductResponse};
+use super::products::{
+    CreateProductRequest, ListProductsParams, ProductListResponse, ProductResponse,
+    SetProductAvailabilityRequest, UpdateProductRequest,
+};
 use crate::error::{ErrorBody, ErrorResponse};
 
 /// Combined OpenAPI description for the versioned API.
@@ -29,8 +34,13 @@ use crate::error::{ErrorBody, ErrorResponse};
         super::auth::me,
         super::products::list_products,
         super::products::get_product,
+        super::products::create_product,
+        super::products::update_product,
+        super::products::set_product_availability,
         super::categories::list_categories,
         super::categories::get_category,
+        super::categories::create_category,
+        super::categories::update_category,
     ),
     components(schemas(
         HealthResponse,
@@ -40,8 +50,13 @@ use crate::error::{ErrorBody, ErrorResponse};
         ProductResponse,
         ProductListResponse,
         ListProductsParams,
+        CreateProductRequest,
+        UpdateProductRequest,
+        SetProductAvailabilityRequest,
         CategoryResponse,
         CategoryListResponse,
+        CreateCategoryRequest,
+        UpdateCategoryRequest,
         ErrorResponse,
         ErrorBody,
     )),

@@ -5,7 +5,9 @@ contract the frontend builds against. It is described formally in the OpenAPI
 document served at `GET /api/openapi.json`.
 
 All endpoints in this slice are unauthenticated and only support `GET`.
-Authentication lives in `docs/api/authentication.md`.
+Authentication lives in `docs/api/authentication.md`. Administrative mutations
+(create, update, enable/disable) live in
+[`docs/api/catalog-administration.md`](./catalog-administration.md).
 
 ## Money representation
 
@@ -140,4 +142,6 @@ middleware is not present.
 
 This slice is strictly read-only. Mutations, authentication, pagination and
 stock tracking are deliberately out of scope for now; the OpenAPI document
-describes only what exists today, not future intent.
+describes only what exists today, not future intent. Product and category
+mutations are documented in
+[`catalog-administration.md`](./catalog-administration.md).

@@ -114,9 +114,12 @@ PickupCodeGenerator
 ```
 
 Ports are described in domain terms (`find_user_by_email`, `save_order`,
-`list_products`, `list_categories`) — never in SQL terms (`execute_query`,
-`insert_record`). The future database implementation adapts to these
-interfaces; the application never adapts to the database.
+`list_products`, `create_product`, `update_category`) — never in SQL terms
+(`execute_query`, `insert_record`). Mutation ports return typed write errors and
+never silently upsert: a create fails on an existing identifier and an update
+fails on a missing one, and category names are unique case-insensitively. The
+future database implementation adapts to these interfaces; the application
+never adapts to the database.
 
 `cantina-infrastructure` provides concrete adapters (`InMemory*Repository`,
 `SystemClock`, `Generator`, `DefaultPickupCodeGenerator`) that implement those
@@ -129,7 +132,15 @@ change confined to `cantina-infrastructure` and the composition root
 The API is versioned under `/api/v1` and described by an OpenAPI 3.1 document
 served at `GET /api/openapi.json`. That document is the single source of truth
 for the wire format: HTTP DTOs, never domain models or storage shapes. The
-read-only catalog slice is documented by hand in `docs/api/catalog.md`.
+read-only catalog slice is documented by hand in `docs/api/catalog.md`; its
+administrative mutations (create, update, enable/disable) are documented in
+`docs/api/catalog-administration.md`.
+
+Authorization is enforced by the application use cases. HTTP handlers
+authenticate the bearer token and extract the `Principal`, but never re-check
+roles on their own: product mutations allow Canteen/Admin and category
+mutations allow Admin only (see the role matrix in
+`docs/api/catalog-administration.md` and ADR 0003).
 
 List endpoints return `{"items": [...]}` envelopes, and every non-success
 response uses a single `{"error": {code, message, request_id}}` envelope with

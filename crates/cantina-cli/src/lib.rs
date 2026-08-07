@@ -135,9 +135,10 @@ pub struct ProductsCmd {
 pub enum ProductsSub {
     List(ProductsListArgs),
     Show(ProductShowArgs),
-    Create,
-    Update,
-    Disable,
+    Create(ProductsCreateArgs),
+    Update(ProductsUpdateArgs),
+    Enable(ProductIdArgs),
+    Disable(ProductIdArgs),
 }
 
 /// Filters accepted by `products list`.
@@ -163,6 +164,60 @@ pub struct ProductShowArgs {
     pub id: String,
 }
 
+/// Arguments accepted by `products create`.
+#[derive(Debug, Args)]
+pub struct ProductsCreateArgs {
+    /// Product name (required).
+    #[arg(long)]
+    pub name: String,
+
+    /// Product description; empty by default.
+    #[arg(long, default_value = "")]
+    pub description: String,
+
+    /// Price in integer centavos (required).
+    #[arg(long)]
+    pub price_cents: u64,
+
+    /// Identifier of the category that contains the product.
+    #[arg(long)]
+    pub category_id: String,
+
+    /// Create the product as unavailable; it is available by default.
+    #[arg(long)]
+    pub unavailable: bool,
+}
+
+/// Arguments accepted by `products update`.
+#[derive(Debug, Args)]
+pub struct ProductsUpdateArgs {
+    /// Product identifier.
+    pub product_id: String,
+
+    /// New product name.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// New product description.
+    #[arg(long)]
+    pub description: Option<String>,
+
+    /// New price in integer centavos.
+    #[arg(long)]
+    pub price_cents: Option<u64>,
+
+    /// New category identifier.
+    #[arg(long)]
+    pub category_id: Option<String>,
+}
+
+/// A single product identifier, used by `enable` and `disable`.
+#[derive(Debug, Args)]
+pub struct ProductIdArgs {
+    /// Product identifier.
+    pub product_id: String,
+}
+
 #[derive(Debug, Args)]
 pub struct CategoriesCmd {
     #[command(subcommand)]
@@ -172,6 +227,27 @@ pub struct CategoriesCmd {
 #[derive(Debug, Subcommand)]
 pub enum CategoriesSub {
     List,
+    Create(CategoriesCreateArgs),
+    Update(CategoriesUpdateArgs),
+}
+
+/// Arguments accepted by `categories create`.
+#[derive(Debug, Args)]
+pub struct CategoriesCreateArgs {
+    /// Category name (required).
+    #[arg(long)]
+    pub name: String,
+}
+
+/// Arguments accepted by `categories update`.
+#[derive(Debug, Args)]
+pub struct CategoriesUpdateArgs {
+    /// Category identifier.
+    pub category_id: String,
+
+    /// New category name.
+    #[arg(long)]
+    pub name: String,
 }
 
 #[derive(Debug, Args)]
@@ -249,19 +325,96 @@ pub async fn run(cli: Cli) -> Result<(), api::CliError> {
                 commands::products::show(&api_url(cli.api_url.as_deref()), cli.format, &args.id)
                     .await
             }
-            ProductsSub::Create => Err(api::CliError::NotImplemented {
-                command: "products create",
-            }),
-            ProductsSub::Update => Err(api::CliError::NotImplemented {
-                command: "products update",
-            }),
-            ProductsSub::Disable => Err(api::CliError::NotImplemented {
-                command: "products disable",
-            }),
+            ProductsSub::Create(args) => {
+                let token = access_token(cli.token.as_ref().and_then(SecretArg::as_secret))?;
+                let request = api::CreateProductRequest {
+                    name: args.name,
+                    description: args.description,
+                    price: args.price_cents,
+                    category_id: args.category_id,
+                    available: !args.unavailable,
+                };
+                commands::products::create(
+                    &api_url(cli.api_url.as_deref()),
+                    cli.format,
+                    &token,
+                    &request,
+                )
+                .await
+            }
+            ProductsSub::Update(args) => {
+                let token = access_token(cli.token.as_ref().and_then(SecretArg::as_secret))?;
+                if args.name.is_none()
+                    && args.description.is_none()
+                    && args.price_cents.is_none()
+                    && args.category_id.is_none()
+                {
+                    return Err(api::CliError::EmptyUpdate);
+                }
+                let request = api::UpdateProductRequest {
+                    name: args.name,
+                    description: args.description,
+                    price: args.price_cents,
+                    category_id: args.category_id,
+                };
+                commands::products::update(
+                    &api_url(cli.api_url.as_deref()),
+                    cli.format,
+                    &token,
+                    &args.product_id,
+                    &request,
+                )
+                .await
+            }
+            ProductsSub::Enable(args) => {
+                let token = access_token(cli.token.as_ref().and_then(SecretArg::as_secret))?;
+                commands::products::set_availability(
+                    &api_url(cli.api_url.as_deref()),
+                    cli.format,
+                    &token,
+                    &args.product_id,
+                    true,
+                )
+                .await
+            }
+            ProductsSub::Disable(args) => {
+                let token = access_token(cli.token.as_ref().and_then(SecretArg::as_secret))?;
+                commands::products::set_availability(
+                    &api_url(cli.api_url.as_deref()),
+                    cli.format,
+                    &token,
+                    &args.product_id,
+                    false,
+                )
+                .await
+            }
         },
         Command::Categories(cmd) => match cmd.sub {
             CategoriesSub::List => {
                 commands::categories::list(&api_url(cli.api_url.as_deref()), cli.format).await
+            }
+            CategoriesSub::Create(args) => {
+                let token = access_token(cli.token.as_ref().and_then(SecretArg::as_secret))?;
+                let request = api::CreateCategoryRequest { name: args.name };
+                commands::categories::create(
+                    &api_url(cli.api_url.as_deref()),
+                    cli.format,
+                    &token,
+                    &request,
+                )
+                .await
+            }
+            CategoriesSub::Update(args) => {
+                let token = access_token(cli.token.as_ref().and_then(SecretArg::as_secret))?;
+                let request = api::UpdateCategoryRequest { name: args.name };
+                commands::categories::update(
+                    &api_url(cli.api_url.as_deref()),
+                    cli.format,
+                    &token,
+                    &args.category_id,
+                    &request,
+                )
+                .await
             }
         },
         Command::Auth(cmd) => match cmd.sub {

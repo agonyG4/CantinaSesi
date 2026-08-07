@@ -17,7 +17,7 @@ use cantina_application::auth::AuthService;
 use cantina_application::catalog::CatalogService;
 use cantina_application::orders::OrderService;
 use cantina_application::ports::{
-    Clock, IdGenerator, PickupCodeGenerator, ProductRepository, RepositoryError,
+    CatalogWriteError, Clock, IdGenerator, PickupCodeGenerator, ProductRepository, RepositoryError,
 };
 use cantina_core::catalog::{Product, ProductId};
 use cantina_infrastructure::config::Config;
@@ -39,6 +39,18 @@ impl ProductRepository for FailingProductRepository {
 
     async fn list_products(&self) -> Result<Vec<Product>, RepositoryError> {
         Err(RepositoryError::new("injected storage failure"))
+    }
+
+    async fn create_product(&self, _product: Product) -> Result<(), CatalogWriteError> {
+        Err(CatalogWriteError::Internal(
+            "injected storage failure".to_string(),
+        ))
+    }
+
+    async fn update_product(&self, _product: Product) -> Result<(), CatalogWriteError> {
+        Err(CatalogWriteError::Internal(
+            "injected storage failure".to_string(),
+        ))
     }
 }
 
@@ -76,6 +88,7 @@ async fn failing_router() -> axum::Router<()> {
         Arc::new(CatalogService::new(
             Arc::new(FailingProductRepository),
             repositories.categories.clone(),
+            ids.clone(),
         )),
         Arc::new(OrderService::new(
             repositories.orders.clone(),
@@ -150,6 +163,66 @@ async fn post(
     (status, headers, json)
 }
 
+/// Sends an authenticated JSON request and returns status, headers and body.
+async fn authed_request(
+    router: &axum::Router<()>,
+    method: &str,
+    uri: &str,
+    token: &str,
+    body: Option<Value>,
+) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if !token.is_empty() {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    let body = match body {
+        Some(payload) => {
+            builder = builder.header("content-type", "application/json");
+            Body::from(payload.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = router
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    if bytes.is_empty() {
+        return (status, headers, Value::Null);
+    }
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    (status, headers, json)
+}
+
+/// Logs in as the seeded user with the given credentials.
+async fn token_for(router: &axum::Router<()>, email: &str, password: &str) -> String {
+    let (status, _, json) = post(
+        router,
+        "/api/v1/auth/login",
+        serde_json::json!({
+            "email": email,
+            "password": password,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "login for {email} must succeed");
+    json["access_token"].as_str().unwrap().to_string()
+}
+
+/// Logs in as the seeded canteen operator and returns the access token.
+async fn canteen_token(router: &axum::Router<()>) -> String {
+    token_for(router, "cantina@example.com", "CanteenDemo!2026").await
+}
+
+/// Logs in as the seeded admin and returns the access token.
+async fn admin_token(router: &axum::Router<()>) -> String {
+    token_for(router, "admin@example.com", "AdminDemo!2026").await
+}
+
+/// `GET` via the given router (used by the authenticated helpers).
 async fn authenticated_get(
     router: &axum::Router<()>,
     uri: &str,
@@ -938,6 +1011,113 @@ async fn openapi_auth_security_is_correct() {
     }
 }
 
+#[tokio::test]
+async fn openapi_documents_all_catalog_mutation_paths() {
+    let (_, _, json) = get("/api/openapi.json").await;
+    let paths = json["paths"].as_object().unwrap();
+    for (path, methods) in [
+        ("/api/v1/products", vec!["get", "post"]),
+        ("/api/v1/products/{product_id}", vec!["get", "patch"]),
+        ("/api/v1/products/{product_id}/availability", vec!["patch"]),
+        ("/api/v1/categories", vec!["get", "post"]),
+        ("/api/v1/categories/{category_id}", vec!["get", "patch"]),
+    ] {
+        let operations = paths
+            .get(path)
+            .unwrap_or_else(|| panic!("missing OpenAPI path: {path}"));
+        for method in methods {
+            assert!(
+                operations.get(method).is_some(),
+                "missing {method} on {path}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn openapi_mutations_require_bearer_but_public_reads_do_not() {
+    let (_, _, json) = get("/api/openapi.json").await;
+    let paths = json["paths"].as_object().unwrap();
+
+    for (path, method) in [
+        ("/api/v1/products", "post"),
+        ("/api/v1/products/{product_id}", "patch"),
+        ("/api/v1/products/{product_id}/availability", "patch"),
+        ("/api/v1/categories", "post"),
+        ("/api/v1/categories/{category_id}", "patch"),
+    ] {
+        let security = paths[path][method]["security"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{method} {path} must declare security"));
+        assert!(!security.is_empty(), "{method} {path} must require bearer");
+        assert!(
+            security
+                .iter()
+                .any(|requirement| requirement["auth_bearer"].is_array()),
+            "{method} {path} must reference auth_bearer"
+        );
+    }
+
+    for (path, method) in [("/api/v1/products", "get"), ("/api/v1/categories", "get")] {
+        let security = &paths[path][method]["security"];
+        assert!(
+            security.is_null() || security.as_array().is_some_and(|items| items.is_empty()),
+            "public {method} {path} must not require bearer"
+        );
+    }
+}
+
+#[tokio::test]
+async fn openapi_documents_mutation_request_and_response_schemas() {
+    let (_, _, json) = get("/api/openapi.json").await;
+    let schemas = json["components"]["schemas"].as_object().unwrap();
+    for schema in [
+        "CreateProductRequest",
+        "UpdateProductRequest",
+        "SetProductAvailabilityRequest",
+        "CreateCategoryRequest",
+        "UpdateCategoryRequest",
+        "ProductResponse",
+        "CategoryResponse",
+        "ErrorResponse",
+    ] {
+        assert!(
+            schemas.contains_key(schema),
+            "missing OpenAPI schema: {schema}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn openapi_create_product_has_201_and_location_and_error_schemas() {
+    let (_, _, json) = get("/api/openapi.json").await;
+    let operation = &json["paths"]["/api/v1/products"]["post"];
+    let responses = operation["responses"].as_object().unwrap();
+    assert!(
+        responses.contains_key("201"),
+        "create product must document a 201 response"
+    );
+    let created = &responses["201"];
+    let ref_name = created["content"]["application/json"]["schema"]["$ref"]
+        .as_str()
+        .unwrap();
+    assert_eq!(ref_name, "#/components/schemas/ProductResponse");
+    let headers = created["headers"].as_object().unwrap();
+    assert!(
+        headers.contains_key("Location"),
+        "201 must document the Location header"
+    );
+    for status in ["400", "401", "403", "404", "422", "500"] {
+        let ref_name = responses[status]["content"]["application/json"]["schema"]["$ref"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            ref_name, "#/components/schemas/ErrorResponse",
+            "status {status} must reference the standardized error schema"
+        );
+    }
+}
+
 /// POSTs `/api/v1/auth/logout` with the given bearer token.
 async fn logout_with_token(
     router: &axum::Router<()>,
@@ -964,4 +1144,534 @@ async fn logout_with_token(
         serde_json::from_slice(&body).unwrap()
     };
     (status, headers, json)
+}
+
+#[tokio::test]
+async fn canteen_can_create_a_product_over_http() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+
+    let (status, headers, json) = authed_request(
+        &router,
+        "POST",
+        "/api/v1/products",
+        &token,
+        Some(serde_json::json!({
+            "name": "Sanduíche natural",
+            "description": "Pão integral, frango e salada",
+            "price": 1200,
+            "category_id": "category_snacks",
+            "available": true,
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        headers["location"]
+            .to_str()
+            .unwrap()
+            .starts_with("/api/v1/products/")
+    );
+    assert_eq!(json["name"], "Sanduíche natural");
+    assert_eq!(json["price"], 1200);
+    assert_eq!(json["available"], true);
+}
+
+#[tokio::test]
+async fn product_available_defaults_to_true_when_omitted() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+
+    let (status, _, json) = authed_request(
+        &router,
+        "POST",
+        "/api/v1/products",
+        &token,
+        Some(serde_json::json!({
+            "name": "Bolo de cenoura",
+            "description": "",
+            "price": 700,
+            "category_id": "category_snacks",
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["available"], true);
+}
+
+#[tokio::test]
+async fn admin_can_create_a_product_over_http() {
+    let router = router().await;
+    let token = admin_token(&router).await;
+    let (status, _, _) = authed_request(
+        &router,
+        "POST",
+        "/api/v1/products",
+        &token,
+        Some(serde_json::json!({
+            "name": "Suco de laranja",
+            "description": "",
+            "price": 400,
+            "category_id": "category_drinks",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn create_product_without_token_is_unauthorized() {
+    let router = router().await;
+    let (status, headers, json) = authed_request(
+        &router,
+        "POST",
+        "/api/v1/products",
+        "",
+        Some(serde_json::json!({
+            "name": "Bolo",
+            "description": "",
+            "price": 700,
+            "category_id": "category_snacks",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(json["error"]["code"], "AUTHENTICATION_REQUIRED");
+    assert_eq!(headers["www-authenticate"], "Bearer");
+    assert!(json["error"]["request_id"].is_string());
+}
+
+#[tokio::test]
+async fn student_cannot_create_a_product_over_http() {
+    let router = router().await;
+    let token = student_token(&router).await;
+    let (status, headers, json) = authed_request(
+        &router,
+        "POST",
+        "/api/v1/products",
+        &token,
+        Some(serde_json::json!({
+            "name": "Bolo",
+            "description": "",
+            "price": 700,
+            "category_id": "category_snacks",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json["error"]["code"], "FORBIDDEN");
+    assert_eq!(headers["www-authenticate"], "Bearer");
+}
+
+#[tokio::test]
+async fn malformed_product_body_is_a_400() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/products")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from("{ not json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "INVALID_REQUEST_BODY");
+    assert!(json["error"]["request_id"].is_string());
+}
+
+#[tokio::test]
+async fn oversized_product_body_is_rejected() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+    let huge_name = "a".repeat(40 * 1024);
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/products")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    "{{\"name\":\"{huge_name}\",\"description\":\"\",\"price\":100,\"category_id\":\"category_snacks\"}}"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "INVALID_REQUEST_BODY");
+    assert!(json["error"]["request_id"].is_string());
+}
+
+#[tokio::test]
+async fn invalid_product_fields_are_a_422() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+    let (status, _, json) = authed_request(
+        &router,
+        "POST",
+        "/api/v1/products",
+        &token,
+        Some(serde_json::json!({
+            "name": "Bolo",
+            "description": "",
+            "price": 0,
+            "category_id": "category_snacks",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(json["error"]["code"], "INVALID_PRODUCT_PRICE");
+    assert!(json["error"]["request_id"].is_string());
+}
+
+#[tokio::test]
+async fn create_product_with_unknown_category_is_404() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+    let (status, _, json) = authed_request(
+        &router,
+        "POST",
+        "/api/v1/products",
+        &token,
+        Some(serde_json::json!({
+            "name": "Bolo",
+            "description": "",
+            "price": 700,
+            "category_id": "category_missing",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json["error"]["code"], "NOT_FOUND");
+    assert!(json["error"]["request_id"].is_string());
+}
+
+#[tokio::test]
+async fn newly_created_product_appears_in_public_listing() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+    let (status, _, created) = authed_request(
+        &router,
+        "POST",
+        "/api/v1/products",
+        &token,
+        Some(serde_json::json!({
+            "name": "Escondidinho",
+            "description": "Mashed potato with meat",
+            "price": 1100,
+            "category_id": "category_snacks",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (status, _, list) = get_from(&router, "/api/v1/products").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == id)
+    );
+}
+
+#[tokio::test]
+async fn canteen_can_update_a_product_over_http() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+
+    let (status, _, json) = authed_request(
+        &router,
+        "PATCH",
+        "/api/v1/products/product_coxinha",
+        &token,
+        Some(serde_json::json!({
+            "name": "Coxinha grande",
+            "price": 900,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["name"], "Coxinha grande");
+    assert_eq!(json["price"], 900);
+    assert_eq!(json["description"], "Fried shredded-chicken pastry");
+}
+
+#[tokio::test]
+async fn empty_product_update_is_a_422() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+    let (status, _, json) = authed_request(
+        &router,
+        "PATCH",
+        "/api/v1/products/product_coxinha",
+        &token,
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(json["error"]["code"], "EMPTY_UPDATE");
+    assert!(json["error"]["request_id"].is_string());
+}
+
+#[tokio::test]
+async fn update_unknown_product_is_a_404() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+    let (status, _, json) = authed_request(
+        &router,
+        "PATCH",
+        "/api/v1/products/product_missing",
+        &token,
+        Some(serde_json::json!({ "name": "Novo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json["error"]["code"], "NOT_FOUND");
+    assert!(json["error"]["request_id"].is_string());
+}
+
+#[tokio::test]
+async fn student_cannot_update_a_product_over_http() {
+    let router = router().await;
+    let token = student_token(&router).await;
+    let (status, _, json) = authed_request(
+        &router,
+        "PATCH",
+        "/api/v1/products/product_coxinha",
+        &token,
+        Some(serde_json::json!({ "name": "Novo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json["error"]["code"], "FORBIDDEN");
+}
+
+#[tokio::test]
+async fn canteen_can_disable_and_enable_a_product_over_http() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+
+    let (status, _, json) = authed_request(
+        &router,
+        "PATCH",
+        "/api/v1/products/product_coxinha/availability",
+        &token,
+        Some(serde_json::json!({ "available": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["available"], false);
+
+    let (status, _, json) = authed_request(
+        &router,
+        "PATCH",
+        "/api/v1/products/product_coxinha/availability",
+        &token,
+        Some(serde_json::json!({ "available": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["available"], true);
+}
+
+#[tokio::test]
+async fn availability_disable_is_idempotent() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+    let (_, _, first) = authed_request(
+        &router,
+        "PATCH",
+        "/api/v1/products/product_pastel/availability",
+        &token,
+        Some(serde_json::json!({ "available": false })),
+    )
+    .await;
+    let (status, _, second) = authed_request(
+        &router,
+        "PATCH",
+        "/api/v1/products/product_pastel/availability",
+        &token,
+        Some(serde_json::json!({ "available": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["available"], false);
+    assert_eq!(second["available"], false);
+}
+
+#[tokio::test]
+async fn disabled_product_disappears_from_default_listing_but_shows_when_requested() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+    let (status, _, _) = authed_request(
+        &router,
+        "PATCH",
+        "/api/v1/products/product_coxinha/availability",
+        &token,
+        Some(serde_json::json!({ "available": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, _, default) = get_from(&router, "/api/v1/products").await;
+    assert!(
+        !default["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "product_coxinha")
+    );
+
+    let (_, _, all) = get_from(&router, "/api/v1/products?include_unavailable=true").await;
+    assert!(
+        all["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "product_coxinha" && item["available"] == false)
+    );
+}
+
+#[tokio::test]
+async fn admin_can_create_a_category_over_http() {
+    let router = router().await;
+    let token = admin_token(&router).await;
+    let (status, headers, json) = authed_request(
+        &router,
+        "POST",
+        "/api/v1/categories",
+        &token,
+        Some(serde_json::json!({ "name": "Combos" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        headers["location"]
+            .to_str()
+            .unwrap()
+            .starts_with("/api/v1/categories/")
+    );
+    assert_eq!(json["name"], "Combos");
+}
+
+#[tokio::test]
+async fn canteen_cannot_create_a_category_over_http() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+    let (status, _, json) = authed_request(
+        &router,
+        "POST",
+        "/api/v1/categories",
+        &token,
+        Some(serde_json::json!({ "name": "Combos" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json["error"]["code"], "FORBIDDEN");
+}
+
+#[tokio::test]
+async fn student_cannot_create_a_category_over_http() {
+    let router = router().await;
+    let token = student_token(&router).await;
+    let (status, _, json) = authed_request(
+        &router,
+        "POST",
+        "/api/v1/categories",
+        &token,
+        Some(serde_json::json!({ "name": "Combos" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json["error"]["code"], "FORBIDDEN");
+}
+
+#[tokio::test]
+async fn admin_can_update_a_category_over_http() {
+    let router = router().await;
+    let token = admin_token(&router).await;
+    let (status, _, json) = authed_request(
+        &router,
+        "PATCH",
+        "/api/v1/categories/category_snacks",
+        &token,
+        Some(serde_json::json!({ "name": "Lanches e combos" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["name"], "Lanches e combos");
+
+    let (_, _, read) = get_from(&router, "/api/v1/categories").await;
+    assert!(
+        read["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "category_snacks" && item["name"] == "Lanches e combos")
+    );
+}
+
+#[tokio::test]
+async fn canteen_cannot_update_a_category_over_http() {
+    let router = router().await;
+    let token = canteen_token(&router).await;
+    let (status, _, json) = authed_request(
+        &router,
+        "PATCH",
+        "/api/v1/categories/category_snacks",
+        &token,
+        Some(serde_json::json!({ "name": "Lanches" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json["error"]["code"], "FORBIDDEN");
+}
+
+#[tokio::test]
+async fn duplicate_normalized_category_name_is_a_409() {
+    let router = router().await;
+    let token = admin_token(&router).await;
+    let (status, _, json) = authed_request(
+        &router,
+        "POST",
+        "/api/v1/categories",
+        &token,
+        Some(serde_json::json!({ "name": "snacks" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(json["error"]["code"], "CATEGORY_NAME_CONFLICT");
+    assert!(json["error"]["request_id"].is_string());
+}
+
+#[tokio::test]
+async fn public_reads_remain_public_and_json() {
+    let (status, headers, _) = get("/api/v1/products").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers["content-type"]
+            .to_str()
+            .unwrap()
+            .contains("application/json")
+    );
+
+    let (status, _, _) = get("/api/v1/categories").await;
+    assert_eq!(status, StatusCode::OK);
 }

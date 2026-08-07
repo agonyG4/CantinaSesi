@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::ports::{RepositoryError, SessionRotationError};
+use crate::ports::{CatalogWriteError, RepositoryError, SessionRotationError};
 
 /// Error returned by application use cases.
 ///
@@ -65,6 +65,38 @@ pub enum ApplicationError {
     #[error("session token generation failed")]
     TokenGeneration,
 
+    /// The product name is required.
+    #[error("a product name is required")]
+    InvalidProductName,
+
+    /// The product name exceeds the allowed length.
+    #[error("the product name is too long")]
+    ProductNameTooLong,
+
+    /// The product description exceeds the allowed length.
+    #[error("the product description is too long")]
+    ProductDescriptionTooLong,
+
+    /// The product price must be greater than zero.
+    #[error("the product price must be greater than zero")]
+    InvalidProductPrice,
+
+    /// The category name is required.
+    #[error("a category name is required")]
+    InvalidCategoryName,
+
+    /// The category name exceeds the allowed length.
+    #[error("the category name is too long")]
+    CategoryNameTooLong,
+
+    /// A product update carried no fields to change.
+    #[error("the update is empty")]
+    EmptyUpdate,
+
+    /// A category with the same normalized name already exists.
+    #[error("a category with that name already exists")]
+    CategoryNameConflict,
+
     /// The storage backend failed.
     #[error("storage error: {0}")]
     Storage(String),
@@ -99,6 +131,39 @@ impl From<cantina_core::orders::OrderError> for ApplicationError {
                 from: from.to_string(),
                 to: to.to_string(),
             },
+        }
+    }
+}
+
+impl From<cantina_core::catalog::CatalogError> for ApplicationError {
+    fn from(err: cantina_core::catalog::CatalogError) -> Self {
+        use cantina_core::catalog::CatalogError;
+        match err {
+            CatalogError::EmptyProductName => Self::InvalidProductName,
+            CatalogError::ProductNameTooLong => Self::ProductNameTooLong,
+            CatalogError::ProductDescriptionTooLong => Self::ProductDescriptionTooLong,
+            CatalogError::InvalidProductPrice => Self::InvalidProductPrice,
+            CatalogError::EmptyCategoryName => Self::InvalidCategoryName,
+            CatalogError::CategoryNameTooLong => Self::CategoryNameTooLong,
+        }
+    }
+}
+
+impl From<CatalogWriteError> for ApplicationError {
+    fn from(err: CatalogWriteError) -> Self {
+        use crate::ports::CatalogWriteError;
+        match err {
+            // The use cases pre-check existence, so these repository outcomes
+            // are unexpected and must remain internal rather than leak as
+            // client-facing conflicts.
+            CatalogWriteError::NotFound => {
+                Self::Storage("catalog aggregate disappeared during update".to_string())
+            }
+            CatalogWriteError::IdentifierConflict => {
+                Self::Storage("generated catalog identifier conflict".to_string())
+            }
+            CatalogWriteError::NameConflict => Self::CategoryNameConflict,
+            CatalogWriteError::Internal(message) => Self::Storage(message),
         }
     }
 }

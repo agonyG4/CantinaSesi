@@ -63,6 +63,7 @@ fn available_product() -> Product {
         CategoryId::new("category_1"),
         true,
     )
+    .expect("test product must be valid")
 }
 
 fn unavailable_product() -> Product {
@@ -74,6 +75,7 @@ fn unavailable_product() -> Product {
         CategoryId::new("category_1"),
         false,
     )
+    .expect("test product must be valid")
 }
 
 fn build_service(

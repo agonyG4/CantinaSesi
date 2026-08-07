@@ -93,6 +93,46 @@ pub struct ProductsQuery {
     pub include_unavailable: bool,
 }
 
+/// CLI-owned request body for `POST /api/v1/products`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateProductRequest {
+    pub name: String,
+    pub description: String,
+    /// Price in minor units.
+    pub price: u64,
+    pub category_id: String,
+    pub available: bool,
+}
+
+/// CLI-owned request body for `PATCH /api/v1/products/{product_id}`.
+///
+/// Unset fields are omitted from the serialized request so an update only
+/// changes the fields the caller supplied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateProductRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Price in minor units.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<String>,
+}
+
+/// CLI-owned request body for `POST /api/v1/categories`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateCategoryRequest {
+    pub name: String,
+}
+
+/// CLI-owned request body for `PATCH /api/v1/categories/{category_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateCategoryRequest {
+    pub name: String,
+}
+
 impl ProductsQuery {
     fn pairs(&self) -> Vec<(&'static str, String)> {
         let mut pairs = Vec::new();
@@ -197,6 +237,10 @@ pub enum CliError {
     #[error("a password is required")]
     EmptyPassword,
 
+    /// A product update carried no fields to change.
+    #[error("an update must change at least one field")]
+    EmptyUpdate,
+
     /// A command that has not been implemented yet.
     #[error("command not implemented yet: {command}")]
     NotImplemented { command: &'static str },
@@ -249,6 +293,96 @@ impl ApiClient {
     /// Calls `GET /api/v1/categories`.
     pub async fn list_categories(&self) -> Result<CategoryListResponse, CliError> {
         self.get_json("/api/v1/categories", &[]).await
+    }
+
+    /// Calls `POST /api/v1/products` with the given bearer token.
+    pub async fn create_product(
+        &self,
+        token: &str,
+        request: &CreateProductRequest,
+    ) -> Result<ProductDto, CliError> {
+        self.send_authed_json(
+            reqwest::Method::POST,
+            "/api/v1/products",
+            Some(
+                &serde_json::to_value(request)
+                    .map_err(|source| CliError::OutputSerialization { source })?,
+            ),
+            token,
+        )
+        .await
+    }
+
+    /// Calls `PATCH /api/v1/products/{product_id}` with the given bearer token.
+    pub async fn update_product(
+        &self,
+        token: &str,
+        product_id: &str,
+        request: &UpdateProductRequest,
+    ) -> Result<ProductDto, CliError> {
+        self.send_authed_json(
+            reqwest::Method::PATCH,
+            &format!("/api/v1/products/{product_id}"),
+            Some(
+                &serde_json::to_value(request)
+                    .map_err(|source| CliError::OutputSerialization { source })?,
+            ),
+            token,
+        )
+        .await
+    }
+
+    /// Calls `PATCH /api/v1/products/{product_id}/availability`.
+    pub async fn set_product_availability(
+        &self,
+        token: &str,
+        product_id: &str,
+        available: bool,
+    ) -> Result<ProductDto, CliError> {
+        self.send_authed_json(
+            reqwest::Method::PATCH,
+            &format!("/api/v1/products/{product_id}/availability"),
+            Some(&serde_json::json!({ "available": available })),
+            token,
+        )
+        .await
+    }
+
+    /// Calls `POST /api/v1/categories` with the given bearer token.
+    pub async fn create_category(
+        &self,
+        token: &str,
+        request: &CreateCategoryRequest,
+    ) -> Result<CategoryDto, CliError> {
+        self.send_authed_json(
+            reqwest::Method::POST,
+            "/api/v1/categories",
+            Some(
+                &serde_json::to_value(request)
+                    .map_err(|source| CliError::OutputSerialization { source })?,
+            ),
+            token,
+        )
+        .await
+    }
+
+    /// Calls `PATCH /api/v1/categories/{category_id}` with the given bearer token.
+    pub async fn update_category(
+        &self,
+        token: &str,
+        category_id: &str,
+        request: &UpdateCategoryRequest,
+    ) -> Result<CategoryDto, CliError> {
+        self.send_authed_json(
+            reqwest::Method::PATCH,
+            &format!("/api/v1/categories/{category_id}"),
+            Some(
+                &serde_json::to_value(request)
+                    .map_err(|source| CliError::OutputSerialization { source })?,
+            ),
+            token,
+        )
+        .await
     }
 
     /// Calls `POST /api/v1/auth/login` with the given credentials.
@@ -348,6 +482,35 @@ impl ApiClient {
         if let Some(token) = token {
             request = request.bearer_auth(token);
         }
+        self.send_json(request, url_string).await
+    }
+
+    /// Sends an authenticated POST/PATCH request with an optional JSON body.
+    ///
+    /// The bearer token is placed only in the `Authorization` header; it is
+    /// never appended to the URL or the body.
+    async fn send_authed_json<T: DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        token: &str,
+    ) -> Result<T, CliError> {
+        let url_string = self.build_url(path, &[])?.to_string();
+        let mut request = match method {
+            reqwest::Method::POST => self.client.post(&url_string),
+            reqwest::Method::PATCH => self.client.patch(&url_string),
+            other => {
+                return Err(CliError::InvalidApiUrl {
+                    url: url_string,
+                    message: format!("unsupported HTTP method {other}"),
+                });
+            }
+        };
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        request = request.bearer_auth(token);
         self.send_json(request, url_string).await
     }
 

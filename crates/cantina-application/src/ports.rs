@@ -233,6 +233,18 @@ pub trait ProductRepository: Send + Sync {
     /// not by the adapter, so the same data can feed both the public catalog
     /// and the administrative views.
     async fn list_products(&self) -> Result<Vec<Product>, RepositoryError>;
+
+    /// Persists a new product.
+    ///
+    /// Fails with [`CatalogWriteError::IdentifierConflict`] when the
+    /// identifier already exists. It must never silently upsert.
+    async fn create_product(&self, product: Product) -> Result<(), CatalogWriteError>;
+
+    /// Persists an updated product.
+    ///
+    /// Fails with [`CatalogWriteError::NotFound`] when the identifier does not
+    /// exist. It must never silently upsert.
+    async fn update_product(&self, product: Product) -> Result<(), CatalogWriteError>;
 }
 
 /// Repository for [`Category`] aggregates.
@@ -246,6 +258,43 @@ pub trait CategoryRepository: Send + Sync {
 
     /// Lists every known category.
     async fn list_categories(&self) -> Result<Vec<Category>, RepositoryError>;
+
+    /// Persists a new category.
+    ///
+    /// Fails with [`CatalogWriteError::IdentifierConflict`] when the
+    /// identifier already exists and [`CatalogWriteError::NameConflict`] when
+    /// a category with the same trimmed, case-insensitive normalized name
+    /// already exists. It must never silently upsert.
+    async fn create_category(&self, category: Category) -> Result<(), CatalogWriteError>;
+
+    /// Persists an updated category.
+    ///
+    /// Fails with [`CatalogWriteError::NotFound`] when the identifier does not
+    /// exist and [`CatalogWriteError::NameConflict`] when the new normalized
+    /// name belongs to a different category. Keeping the same normalized name
+    /// succeeds. It must never silently upsert.
+    async fn update_category(&self, category: Category) -> Result<(), CatalogWriteError>;
+}
+
+/// Failure while mutating a catalog aggregate through a repository adapter.
+///
+/// These are stable, domain-shaped outcomes (not found, conflicting name,
+/// identifier collision) rather than raw storage errors. `Internal` carries
+/// storage failures that must remain internal to the application.
+#[derive(Debug, Error)]
+pub enum CatalogWriteError {
+    /// The aggregate does not exist.
+    #[error("the catalog aggregate was not found")]
+    NotFound,
+    /// An aggregate already exists for the identifier.
+    #[error("an aggregate with that identifier already exists")]
+    IdentifierConflict,
+    /// A category with the same normalized name already exists.
+    #[error("a category with that name already exists")]
+    NameConflict,
+    /// The repository failed internally.
+    #[error("storage failure: {0}")]
+    Internal(String),
 }
 
 /// Repository for [`Order`] aggregates.

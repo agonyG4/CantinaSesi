@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use secrecy::SecretString;
 
 use cantina_application::ports::{
-    CategoryRepository, OrderRepository, PasswordService, ProductRepository, RepositoryError,
-    UserRepository,
+    CatalogWriteError, CategoryRepository, OrderRepository, PasswordService, ProductRepository,
+    RepositoryError, UserRepository,
 };
 use cantina_core::catalog::{Category, CategoryId, Product, ProductId};
 use cantina_core::orders::{Order, OrderId};
@@ -95,6 +95,26 @@ impl ProductRepository for InMemoryProductRepository {
     async fn list_products(&self) -> Result<Vec<Product>, RepositoryError> {
         Ok(lock_store(&self.products)?.values().cloned().collect())
     }
+
+    async fn create_product(&self, product: Product) -> Result<(), CatalogWriteError> {
+        let mut products = lock_store(&self.products)
+            .map_err(|_| CatalogWriteError::Internal("product store lock poisoned".to_string()))?;
+        if products.contains_key(product.id().as_str()) {
+            return Err(CatalogWriteError::IdentifierConflict);
+        }
+        products.insert(product.id().as_str().to_string(), product);
+        Ok(())
+    }
+
+    async fn update_product(&self, product: Product) -> Result<(), CatalogWriteError> {
+        let mut products = lock_store(&self.products)
+            .map_err(|_| CatalogWriteError::Internal("product store lock poisoned".to_string()))?;
+        if !products.contains_key(product.id().as_str()) {
+            return Err(CatalogWriteError::NotFound);
+        }
+        products.insert(product.id().as_str().to_string(), product);
+        Ok(())
+    }
 }
 
 /// In-memory adapter for the `CategoryRepository` port.
@@ -134,6 +154,38 @@ impl CategoryRepository for InMemoryCategoryRepository {
 
     async fn list_categories(&self) -> Result<Vec<Category>, RepositoryError> {
         Ok(lock_store(&self.categories)?.values().cloned().collect())
+    }
+
+    async fn create_category(&self, category: Category) -> Result<(), CatalogWriteError> {
+        let mut categories = lock_store(&self.categories)
+            .map_err(|_| CatalogWriteError::Internal("category store lock poisoned".to_string()))?;
+        if categories.contains_key(category.id().as_str()) {
+            return Err(CatalogWriteError::IdentifierConflict);
+        }
+        if categories
+            .values()
+            .any(|c| c.normalized_name() == category.normalized_name())
+        {
+            return Err(CatalogWriteError::NameConflict);
+        }
+        categories.insert(category.id().as_str().to_string(), category);
+        Ok(())
+    }
+
+    async fn update_category(&self, category: Category) -> Result<(), CatalogWriteError> {
+        let mut categories = lock_store(&self.categories)
+            .map_err(|_| CatalogWriteError::Internal("category store lock poisoned".to_string()))?;
+        if !categories.contains_key(category.id().as_str()) {
+            return Err(CatalogWriteError::NotFound);
+        }
+        let conflict = categories
+            .values()
+            .any(|c| c.id() != category.id() && c.normalized_name() == category.normalized_name());
+        if conflict {
+            return Err(CatalogWriteError::NameConflict);
+        }
+        categories.insert(category.id().as_str().to_string(), category);
+        Ok(())
     }
 }
 
@@ -229,56 +281,56 @@ impl InMemoryRepositories {
 
         repos
             .categories
-            .insert(Category::new(CategoryId::new("category_snacks"), "Snacks"))?;
+            .insert(seed_category("category_snacks", "Snacks"))?;
         repos
             .categories
-            .insert(Category::new(CategoryId::new("category_drinks"), "Drinks"))?;
+            .insert(seed_category("category_drinks", "Drinks"))?;
         repos
             .categories
-            .insert(Category::new(CategoryId::new("category_bakery"), "Padaria"))?;
+            .insert(seed_category("category_bakery", "Padaria"))?;
 
-        repos.products.insert(Product::new(
-            ProductId::new("product_brigadeiro"),
+        repos.products.insert(seed_product(
+            "product_brigadeiro",
             "Brigadeiro",
             "Chocolate truffle, school classic",
             500,
-            CategoryId::new("category_snacks"),
+            "category_snacks",
             true,
         ))?;
 
-        repos.products.insert(Product::new(
-            ProductId::new("product_coxinha"),
+        repos.products.insert(seed_product(
+            "product_coxinha",
             "Coxinha",
             "Fried shredded-chicken pastry",
             750,
-            CategoryId::new("category_snacks"),
+            "category_snacks",
             true,
         ))?;
 
-        repos.products.insert(Product::new(
-            ProductId::new("product_refresco"),
+        repos.products.insert(seed_product(
+            "product_refresco",
             "Refresco de limão",
             "Fresh lemonade",
             300,
-            CategoryId::new("category_drinks"),
+            "category_drinks",
             true,
         ))?;
 
-        repos.products.insert(Product::new(
-            ProductId::new("product_pao_de_queijo"),
+        repos.products.insert(seed_product(
+            "product_pao_de_queijo",
             "Pão de queijo",
             "Baked cheese bread",
             350,
-            CategoryId::new("category_bakery"),
+            "category_bakery",
             true,
         ))?;
 
-        repos.products.insert(Product::new(
-            ProductId::new("product_pastel"),
+        repos.products.insert(seed_product(
+            "product_pastel",
             "Pastel de queijo",
             "Cheese pastry, temporarily unavailable",
             600,
-            CategoryId::new("category_snacks"),
+            "category_snacks",
             false,
         ))?;
 
@@ -354,13 +406,38 @@ impl Default for InMemoryRepositories {
     }
 }
 
+/// Builds a valid seeded product, mapping validation errors onto storage
+/// errors (seed data is known to be valid).
+fn seed_product(
+    id: &str,
+    name: &str,
+    description: &str,
+    price: u64,
+    category: &str,
+    available: bool,
+) -> Product {
+    Product::new(
+        ProductId::new(id),
+        name,
+        description,
+        price,
+        CategoryId::new(category),
+        available,
+    )
+    .expect("seed product data must be valid")
+}
+
+/// Builds a valid seeded category.
+fn seed_category(id: &str, name: &str) -> Category {
+    Category::new(CategoryId::new(id), name).expect("seed category data must be valid")
+}
+
 #[cfg(test)]
 mod tests {
     use cantina_application::ports::{CategoryRepository, ProductRepository, UserRepository};
-    use cantina_core::catalog::{Category, CategoryId, Product, ProductId};
     use cantina_core::users::{User, UserId, UserRole, UserStatus};
 
-    use super::InMemoryRepositories;
+    use super::{InMemoryRepositories, seed_category, seed_product};
 
     #[tokio::test]
     async fn seeded_repositories_expose_demo_data() {
@@ -370,20 +447,13 @@ mod tests {
         assert!(
             repos
                 .products
-                .insert(Product::new(
-                    ProductId::new("product_x"),
-                    "X",
-                    "X",
-                    100,
-                    CategoryId::new("category_x"),
-                    true,
-                ))
+                .insert(seed_product("product_x", "X", "X", 100, "category_x", true))
                 .is_ok()
         );
         assert!(
             repos
                 .categories
-                .insert(Category::new(CategoryId::new("category_x"), "X"))
+                .insert(seed_category("category_x", "X"))
                 .is_ok()
         );
         assert!(

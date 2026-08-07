@@ -1,6 +1,10 @@
-//! `cantina products list` and `cantina products show`.
+//! `cantina products` command implementations.
 
-use crate::api::{ApiClient, CliError, ProductDto, ProductsQuery};
+use secrecy::ExposeSecret;
+
+use crate::api::{
+    ApiClient, CliError, CreateProductRequest, ProductDto, ProductsQuery, UpdateProductRequest,
+};
 use crate::output::{OutputFormat, format_brl, render};
 
 /// Executes `products list` against the given API base URL.
@@ -23,6 +27,83 @@ pub async fn list(
     )?;
     println!("{rendered}");
     Ok(())
+}
+
+/// Executes `products show <id>` against the given API base URL.
+pub async fn show(api_url: &str, format: OutputFormat, id: &str) -> Result<(), CliError> {
+    let client = ApiClient::new(api_url)?;
+    let product = client.get_product(id).await?;
+    print_product(&product, format)
+}
+
+/// Executes `products create` against the given API base URL.
+pub async fn create(
+    api_url: &str,
+    format: OutputFormat,
+    token: &secrecy::SecretString,
+    request: &CreateProductRequest,
+) -> Result<(), CliError> {
+    let client = ApiClient::new(api_url)?;
+    let product = client
+        .create_product(token.expose_secret(), request)
+        .await?;
+    print_product(&product, format)
+}
+
+/// Executes `products update <product-id>` against the given API base URL.
+pub async fn update(
+    api_url: &str,
+    format: OutputFormat,
+    token: &secrecy::SecretString,
+    product_id: &str,
+    request: &UpdateProductRequest,
+) -> Result<(), CliError> {
+    let client = ApiClient::new(api_url)?;
+    let product = client
+        .update_product(token.expose_secret(), product_id, request)
+        .await?;
+    print_product(&product, format)
+}
+
+/// Executes `products enable`/`disable` against the given API base URL.
+pub async fn set_availability(
+    api_url: &str,
+    format: OutputFormat,
+    token: &secrecy::SecretString,
+    product_id: &str,
+    available: bool,
+) -> Result<(), CliError> {
+    let client = ApiClient::new(api_url)?;
+    let product = client
+        .set_product_availability(token.expose_secret(), product_id, available)
+        .await?;
+    print_product(&product, format)
+}
+
+/// Prints a single [`ProductDto`] in the requested format.
+pub fn print_product(product: &ProductDto, format: OutputFormat) -> Result<(), CliError> {
+    let rendered = render_product(product, format)?;
+    println!("{rendered}");
+    Ok(())
+}
+
+/// Renders a single [`ProductDto`] in the requested format.
+pub fn render_product(product: &ProductDto, format: OutputFormat) -> Result<String, CliError> {
+    render(
+        product,
+        || {
+            format!(
+                "name: {}\nid: {}\ndescription: {}\nprice: {}\ncategory: {}\navailable: {}",
+                product.name,
+                product.id,
+                product.description,
+                format_brl(product.price),
+                product.category_id,
+                availability(product.available)
+            )
+        },
+        format,
+    )
 }
 
 /// Renders a deterministic, aligned table of products.
@@ -73,34 +154,6 @@ fn format_row(cells: &[String], widths: &[usize]) -> String {
         .join("  ")
 }
 
-/// Executes `products show <id>` against the given API base URL.
-pub async fn show(api_url: &str, format: OutputFormat, id: &str) -> Result<(), CliError> {
-    let client = ApiClient::new(api_url)?;
-    let product = client.get_product(id).await?;
-    print_product(&product, format)
-}
-
-/// Prints a single [`ProductDto`] in the requested format.
-pub fn print_product(product: &ProductDto, format: OutputFormat) -> Result<(), CliError> {
-    let rendered = render(
-        product,
-        || {
-            format!(
-                "name: {}\nid: {}\ndescription: {}\nprice: {}\ncategory: {}\navailable: {}",
-                product.name,
-                product.id,
-                product.description,
-                format_brl(product.price),
-                product.category_id,
-                availability(product.available)
-            )
-        },
-        format,
-    )?;
-    println!("{rendered}");
-    Ok(())
-}
-
 fn availability(available: bool) -> &'static str {
     if available {
         "available"
@@ -111,8 +164,9 @@ fn availability(available: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::render_products_table;
+    use super::{render_product, render_products_table};
     use crate::api::ProductDto;
+    use crate::output::OutputFormat;
 
     fn product(id: &str, name: &str, price: u64, category: &str, available: bool) -> ProductDto {
         ProductDto {
@@ -123,6 +177,31 @@ mod tests {
             category_id: category.to_string(),
             available,
         }
+    }
+
+    #[test]
+    fn human_output_prints_product_fields() {
+        let rendered = render_product(
+            &product("product_1", "Bolo", 700, "category_snacks", true),
+            OutputFormat::Human,
+        )
+        .unwrap();
+        assert!(rendered.contains("name: Bolo"));
+        assert!(rendered.contains("id: product_1"));
+        assert!(rendered.contains("price: R$ 7,00"));
+        assert!(rendered.contains("available: available"));
+    }
+
+    #[test]
+    fn json_output_prints_the_exact_payload() {
+        let rendered = render_product(
+            &product("product_1", "Bolo", 700, "category_snacks", true),
+            OutputFormat::Json,
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(json["id"], "product_1");
+        assert_eq!(json["price"], 700);
     }
 
     #[test]

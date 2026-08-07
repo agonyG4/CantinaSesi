@@ -18,9 +18,10 @@ use cantina_core::orders::{Order, OrderId};
 use cantina_core::users::{User, UserId};
 
 use crate::ports::{
-    CategoryRepository, Clock, CredentialRepository, OrderRepository, PasswordError,
-    PasswordService, ProductRepository, RepositoryError, SessionRecord, SessionRepository,
-    SessionRotationError, SessionTokenService, StoredPasswordHash, TokenError, UserRepository,
+    CatalogWriteError, CategoryRepository, Clock, CredentialRepository, OrderRepository,
+    PasswordError, PasswordService, ProductRepository, RepositoryError, SessionRecord,
+    SessionRepository, SessionRotationError, SessionTokenService, StoredPasswordHash, TokenError,
+    UserRepository,
 };
 
 #[derive(Default)]
@@ -61,6 +62,7 @@ impl UserRepository for MemUserRepository {
 #[derive(Default)]
 pub struct MemProductRepository {
     products: Mutex<HashMap<String, Product>>,
+    fail_writes: AtomicBool,
 }
 
 impl MemProductRepository {
@@ -74,6 +76,11 @@ impl MemProductRepository {
             .unwrap()
             .insert(product.id().as_str().to_string(), product);
     }
+
+    /// Makes every mutation fail, simulating a storage outage.
+    pub fn fail_writes(&self) {
+        self.fail_writes.store(true, Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
@@ -85,11 +92,46 @@ impl ProductRepository for MemProductRepository {
     async fn list_products(&self) -> Result<Vec<Product>, RepositoryError> {
         Ok(self.products.lock().unwrap().values().cloned().collect())
     }
+
+    async fn create_product(&self, product: Product) -> Result<(), CatalogWriteError> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(CatalogWriteError::Internal(
+                "injected storage failure".to_string(),
+            ));
+        }
+        let mut store = self
+            .products
+            .lock()
+            .map_err(|_| CatalogWriteError::Internal("product store lock poisoned".to_string()))?;
+        if store.contains_key(product.id().as_str()) {
+            return Err(CatalogWriteError::IdentifierConflict);
+        }
+        store.insert(product.id().as_str().to_string(), product);
+        Ok(())
+    }
+
+    async fn update_product(&self, product: Product) -> Result<(), CatalogWriteError> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(CatalogWriteError::Internal(
+                "injected storage failure".to_string(),
+            ));
+        }
+        let mut store = self
+            .products
+            .lock()
+            .map_err(|_| CatalogWriteError::Internal("product store lock poisoned".to_string()))?;
+        if !store.contains_key(product.id().as_str()) {
+            return Err(CatalogWriteError::NotFound);
+        }
+        store.insert(product.id().as_str().to_string(), product);
+        Ok(())
+    }
 }
 
 #[derive(Default)]
 pub struct MemCategoryRepository {
     categories: Mutex<HashMap<String, Category>>,
+    fail_writes: AtomicBool,
 }
 
 impl MemCategoryRepository {
@@ -102,6 +144,11 @@ impl MemCategoryRepository {
             .lock()
             .unwrap()
             .insert(category.id().as_str().to_string(), category);
+    }
+
+    /// Makes every mutation fail, simulating a storage outage.
+    pub fn fail_writes(&self) {
+        self.fail_writes.store(true, Ordering::SeqCst);
     }
 }
 
@@ -116,6 +163,52 @@ impl CategoryRepository for MemCategoryRepository {
 
     async fn list_categories(&self) -> Result<Vec<Category>, RepositoryError> {
         Ok(self.categories.lock().unwrap().values().cloned().collect())
+    }
+
+    async fn create_category(&self, category: Category) -> Result<(), CatalogWriteError> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(CatalogWriteError::Internal(
+                "injected storage failure".to_string(),
+            ));
+        }
+        let mut store = self
+            .categories
+            .lock()
+            .map_err(|_| CatalogWriteError::Internal("category store lock poisoned".to_string()))?;
+        if store.contains_key(category.id().as_str()) {
+            return Err(CatalogWriteError::IdentifierConflict);
+        }
+        if store
+            .values()
+            .any(|c| c.normalized_name() == category.normalized_name())
+        {
+            return Err(CatalogWriteError::NameConflict);
+        }
+        store.insert(category.id().as_str().to_string(), category);
+        Ok(())
+    }
+
+    async fn update_category(&self, category: Category) -> Result<(), CatalogWriteError> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(CatalogWriteError::Internal(
+                "injected storage failure".to_string(),
+            ));
+        }
+        let mut store = self
+            .categories
+            .lock()
+            .map_err(|_| CatalogWriteError::Internal("category store lock poisoned".to_string()))?;
+        if !store.contains_key(category.id().as_str()) {
+            return Err(CatalogWriteError::NotFound);
+        }
+        let conflict = store
+            .values()
+            .any(|c| c.id() != category.id() && c.normalized_name() == category.normalized_name());
+        if conflict {
+            return Err(CatalogWriteError::NameConflict);
+        }
+        store.insert(category.id().as_str().to_string(), category);
+        Ok(())
     }
 }
 

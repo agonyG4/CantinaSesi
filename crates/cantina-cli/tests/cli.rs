@@ -389,15 +389,24 @@ fn not_implemented_commands_exit_non_zero() {
 }
 
 #[test]
-fn products_create_exits_non_zero_until_implemented() {
+fn products_create_without_token_exits_non_zero() {
     let output = Command::new(BIN)
         .arg("products")
         .arg("create")
+        .arg("--name")
+        .arg("Bolo")
+        .arg("--price-cents")
+        .arg("700")
+        .arg("--category-id")
+        .arg("category_snacks")
         .output()
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("not implemented"));
+    assert!(
+        stderr.contains("authentication required"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -1022,5 +1031,356 @@ fn auth_commands_do_not_create_a_token_persistence_file() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+    server.join().unwrap();
+}
+
+const PRODUCT_CREATED_BODY: &str = r#"{"id":"product_new_1","name":"Bolo","description":"Cake","price":700,"category_id":"category_snacks","available":true}"#;
+
+const CATEGORY_CREATED_BODY: &str = r#"{"id":"category_new_1","name":"Combos"}"#;
+
+#[test]
+fn products_create_sends_post_with_bearer_and_json() {
+    let (url, server) = start_server_raw_request(move |raw| {
+        let lines: Vec<&str> = raw.lines().collect();
+        let request_line = lines.first().unwrap_or(&"");
+        assert!(
+            request_line.starts_with("POST /api/v1/products"),
+            "expected products POST, got: {request_line}"
+        );
+        assert!(
+            raw.contains("Bearer opaque-token-123"),
+            "the bearer token must be attached: {raw}"
+        );
+        assert!(
+            !request_line.contains("opaque-token-123"),
+            "token must not be in the URL"
+        );
+        assert!(
+            raw.contains("\"name\":\"Bolo\""),
+            "missing name in body: {raw}"
+        );
+        assert!(
+            raw.contains("\"price\":700"),
+            "missing integer price: {raw}"
+        );
+        assert!(
+            raw.contains("\"category_id\":\"category_snacks\""),
+            "missing category: {raw}"
+        );
+        assert!(
+            raw.contains("\"available\":true"),
+            "available must default true: {raw}"
+        );
+        (201, PRODUCT_CREATED_BODY.to_string())
+    });
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("products")
+        .arg("create")
+        .arg("--name")
+        .arg("Bolo")
+        .arg("--description")
+        .arg("Cake")
+        .arg("--price-cents")
+        .arg("700")
+        .arg("--category-id")
+        .arg("category_snacks")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "expected success, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Bolo"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("product_new_1"),
+        "unexpected stdout: {stdout}"
+    );
+
+    server.join().unwrap();
+}
+
+#[test]
+fn products_create_sends_unavailable_when_requested() {
+    let (url, server) = start_server_raw_request(move |raw| {
+        assert!(
+            raw.contains("\"available\":false"),
+            "unavailable must map to available=false: {raw}"
+        );
+        (201, PRODUCT_CREATED_BODY.to_string())
+    });
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("products")
+        .arg("create")
+        .arg("--name")
+        .arg("Bolo")
+        .arg("--price-cents")
+        .arg("700")
+        .arg("--category-id")
+        .arg("category_snacks")
+        .arg("--unavailable")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn products_create_json_mode_prints_exact_api_response() {
+    let (url, server) = start_server_raw_request(move |_| (201, PRODUCT_CREATED_BODY.to_string()));
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("--format")
+        .arg("json")
+        .arg("products")
+        .arg("create")
+        .arg("--name")
+        .arg("Bolo")
+        .arg("--price-cents")
+        .arg("700")
+        .arg("--category-id")
+        .arg("category_snacks")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["name"], "Bolo");
+    assert_eq!(json["id"], "product_new_1");
+    server.join().unwrap();
+}
+
+#[test]
+fn products_update_sends_patch_with_only_provided_fields() {
+    let (url, server) = start_server_raw_request(move |raw| {
+        let request_line = raw.lines().next().unwrap_or("");
+        assert!(
+            request_line.starts_with("PATCH /api/v1/products/product_123"),
+            "expected products PATCH, got: {request_line}"
+        );
+        assert!(
+            raw.contains("Bearer opaque-token-123"),
+            "missing bearer: {raw}"
+        );
+        assert!(raw.contains("\"price\":1300"), "missing price: {raw}");
+        assert!(
+            !raw.contains("\"name\""),
+            "unset fields must be omitted: {raw}"
+        );
+        (200, PRODUCT_CREATED_BODY.to_string())
+    });
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("products")
+        .arg("update")
+        .arg("product_123")
+        .arg("--price-cents")
+        .arg("1300")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn products_update_without_fields_fails_locally() {
+    // No server is started: the empty update must abort before any request.
+    let output = Command::new(BIN)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("products")
+        .arg("update")
+        .arg("product_123")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("at least one field"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn products_enable_and_disable_send_availability_patch() {
+    let (url, server) = start_server_raw_request(move |raw| {
+        let request_line = raw.lines().next().unwrap_or("");
+        assert!(
+            request_line.starts_with("PATCH /api/v1/products/product_123/availability"),
+            "expected availability PATCH, got: {request_line}"
+        );
+        assert!(
+            raw.contains("\"available\":false"),
+            "missing available:false: {raw}"
+        );
+        assert!(
+            raw.contains("Bearer opaque-token-123"),
+            "missing bearer: {raw}"
+        );
+        (200, PRODUCT_CREATED_BODY.to_string())
+    });
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("products")
+        .arg("disable")
+        .arg("product_123")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn categories_create_sends_post_and_prints_id_and_name() {
+    let (url, server) = start_server_raw_request(move |raw| {
+        let request_line = raw.lines().next().unwrap_or("");
+        assert!(
+            request_line.starts_with("POST /api/v1/categories"),
+            "expected categories POST, got: {request_line}"
+        );
+        assert!(raw.contains("\"name\":\"Combos\""), "missing name: {raw}");
+        assert!(
+            raw.contains("Bearer opaque-token-123"),
+            "missing bearer: {raw}"
+        );
+        (201, CATEGORY_CREATED_BODY.to_string())
+    });
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("categories")
+        .arg("create")
+        .arg("--name")
+        .arg("Combos")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("ID:"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("category_new_1"),
+        "unexpected stdout: {stdout}"
+    );
+    assert!(stdout.contains("NAME:"), "unexpected stdout: {stdout}");
+    server.join().unwrap();
+}
+
+#[test]
+fn categories_update_sends_patch() {
+    let (url, server) = start_server_raw_request(move |raw| {
+        let request_line = raw.lines().next().unwrap_or("");
+        assert!(
+            request_line.starts_with("PATCH /api/v1/categories/category_1"),
+            "expected categories PATCH, got: {request_line}"
+        );
+        assert!(raw.contains("\"name\":\"Lanches\""), "missing name: {raw}");
+        (200, CATEGORY_CREATED_BODY.to_string())
+    });
+
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("categories")
+        .arg("update")
+        .arg("category_1")
+        .arg("--name")
+        .arg("Lanches")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn mutation_api_403_is_reported() {
+    let body = r#"{"error":{"code":"FORBIDDEN","message":"forbidden","request_id":"req-8"}}"#;
+    let (url, server) = start_server_raw_request(move |_| (403, body.to_string()));
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("categories")
+        .arg("create")
+        .arg("--name")
+        .arg("Combos")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("403"), "unexpected stderr: {stderr}");
+    assert!(stderr.contains("forbidden"), "unexpected stderr: {stderr}");
+    server.join().unwrap();
+}
+
+#[test]
+fn mutation_api_409_is_reported() {
+    let body = r#"{"error":{"code":"CATEGORY_NAME_CONFLICT","message":"a category with that name already exists","request_id":"req-9"}}"#;
+    let (url, server) = start_server_raw_request(move |_| (409, body.to_string()));
+    let output = Command::new(BIN)
+        .arg("--api-url")
+        .arg(&url)
+        .arg("--token")
+        .arg("opaque-token-123")
+        .arg("categories")
+        .arg("create")
+        .arg("--name")
+        .arg("snacks")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("409"), "unexpected stderr: {stderr}");
+    assert!(
+        !stderr.contains("opaque-token-123"),
+        "token must not appear: {stderr}"
+    );
     server.join().unwrap();
 }

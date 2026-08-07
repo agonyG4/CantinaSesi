@@ -19,6 +19,7 @@ crates/
 └── cantina-cli/           Administrative HTTP client (Clap + Reqwest)
 docs/
 ├── api/catalog.md
+├── api/catalog-administration.md
 ├── api/authentication.md
 ├── architecture/backend.md
 └── decisions/
@@ -56,9 +57,28 @@ cargo run -p cantina-cli -- --token "$TOKEN" auth refresh
 cargo run -p cantina-cli -- --token "$TOKEN" auth logout
 ```
 
+Administrative catalog mutations require a bearer token and enforce roles at
+the application layer (products: Canteen/Admin; categories: Admin only):
+
+```bash
+cargo run -p cantina-cli -- --token "$TOKEN" products create \
+  --name "Sanduíche natural" --description "Pão integral" --price-cents 1200 \
+  --category-id category_snacks
+cargo run -p cantina-cli -- --token "$TOKEN" products update product_123 \
+  --name "Novo nome" --price-cents 1300
+cargo run -p cantina-cli -- --token "$TOKEN" products enable product_123
+cargo run -p cantina-cli -- --token "$TOKEN" products disable product_123
+cargo run -p cantina-cli -- --token "$TOKEN" categories create --name "Combos"
+cargo run -p cantina-cli -- --token "$TOKEN" categories update category_123 --name "Lanches"
+```
+
+Prices are always integer centavos (`--price-cents 1200` = R$ 12,00); products
+are disabled via availability rather than deleted.
+
 The read-only catalog endpoints are described in `docs/api/catalog.md`, the
-authentication contract in `docs/api/authentication.md`, and both in the
-OpenAPI document served by the API at `GET /api/openapi.json`.
+administrative mutations in `docs/api/catalog-administration.md`, the
+authentication contract in `docs/api/authentication.md`, and all of them in
+the OpenAPI document served by the API at `GET /api/openapi.json`.
 
 ## How the pieces fit together
 
