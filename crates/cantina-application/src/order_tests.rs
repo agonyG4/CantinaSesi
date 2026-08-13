@@ -11,10 +11,14 @@ use cantina_core::auth::Principal;
 use cantina_core::catalog::{CategoryId, Product, ProductId};
 use cantina_core::orders::{Order, OrderId, OrderItem, OrderStatus, PickupCode};
 use cantina_core::users::{UserId, UserRole};
+use tokio::sync::Barrier;
 
 use crate::error::ApplicationError;
 use crate::orders::{CreateOrderCommand, OrderItemInput, OrderService};
-use crate::ports::{Clock, IdGenerator, PickupCodeGenerationError, PickupCodeGenerator};
+use crate::ports::{
+    Clock, IdGenerator, OrderRepository, OrderStatusTransitionError, PickupCodeGenerationError,
+    PickupCodeGenerator,
+};
 use crate::test_support::{MemOrderRepository, MemProductRepository};
 
 /// Deterministic id generator for tests.
@@ -559,6 +563,134 @@ async fn rejects_total_quantity_above_the_centralized_limit() {
         .unwrap_err();
 
     assert!(matches!(err, ApplicationError::TotalQuantityLimitExceeded));
+}
+
+#[tokio::test]
+async fn competing_status_transitions_allow_only_one_winner() {
+    let (service, orders, _) = seeded_service();
+    service
+        .create_order(
+            &student_principal("student_1"),
+            order_command(vec![OrderItemInput {
+                product_id: ProductId::new("product_1"),
+                quantity: 1,
+            }]),
+        )
+        .await
+        .unwrap();
+
+    let barrier = Arc::new(Barrier::new(3));
+    let confirmed_orders = Arc::clone(&orders);
+    let confirmed_barrier = Arc::clone(&barrier);
+    let confirmed = tokio::spawn(async move {
+        confirmed_barrier.wait().await;
+        confirmed_orders
+            .transition_order_status(&OrderId::new("order_1"), OrderStatus::Confirmed)
+            .await
+    });
+    let cancelled_orders = Arc::clone(&orders);
+    let cancelled_barrier = Arc::clone(&barrier);
+    let cancelled = tokio::spawn(async move {
+        cancelled_barrier.wait().await;
+        cancelled_orders
+            .transition_order_status(&OrderId::new("order_1"), OrderStatus::Cancelled)
+            .await
+    });
+
+    barrier.wait().await;
+    let results = [confirmed.await.unwrap(), cancelled.await.unwrap()];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+    assert!(results.iter().any(|result| matches!(
+        result,
+        Err(OrderStatusTransitionError::InvalidStatusTransition { .. })
+    )));
+
+    let stored = orders.order(&OrderId::new("order_1")).unwrap();
+    assert!(matches!(
+        stored.status(),
+        OrderStatus::Confirmed | OrderStatus::Cancelled
+    ));
+}
+
+#[tokio::test]
+async fn rejects_a_stale_transition_after_the_first_transition_commits() {
+    let (service, orders, _) = seeded_service();
+    service
+        .create_order(
+            &student_principal("student_1"),
+            order_command(vec![OrderItemInput {
+                product_id: ProductId::new("product_1"),
+                quantity: 1,
+            }]),
+        )
+        .await
+        .unwrap();
+
+    orders
+        .transition_order_status(&OrderId::new("order_1"), OrderStatus::Cancelled)
+        .await
+        .unwrap();
+    let stale = orders
+        .transition_order_status(&OrderId::new("order_1"), OrderStatus::Confirmed)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        stale,
+        OrderStatusTransitionError::InvalidStatusTransition {
+            from: OrderStatus::Cancelled,
+            to: OrderStatus::Confirmed,
+        }
+    );
+}
+
+#[tokio::test]
+async fn concurrent_identical_transitions_report_one_success_and_one_conflict() {
+    let (service, orders, _) = seeded_service();
+    service
+        .create_order(
+            &student_principal("student_1"),
+            order_command(vec![OrderItemInput {
+                product_id: ProductId::new("product_1"),
+                quantity: 1,
+            }]),
+        )
+        .await
+        .unwrap();
+
+    let barrier = Arc::new(Barrier::new(3));
+    let first_orders = Arc::clone(&orders);
+    let first_barrier = Arc::clone(&barrier);
+    let first = tokio::spawn(async move {
+        first_barrier.wait().await;
+        first_orders
+            .transition_order_status(&OrderId::new("order_1"), OrderStatus::Confirmed)
+            .await
+    });
+    let second_orders = Arc::clone(&orders);
+    let second_barrier = Arc::clone(&barrier);
+    let second = tokio::spawn(async move {
+        second_barrier.wait().await;
+        second_orders
+            .transition_order_status(&OrderId::new("order_1"), OrderStatus::Confirmed)
+            .await
+    });
+
+    barrier.wait().await;
+    let results = [first.await.unwrap(), second.await.unwrap()];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert!(results.iter().any(|result| matches!(
+        result,
+        Err(OrderStatusTransitionError::InvalidStatusTransition {
+            from: OrderStatus::Confirmed,
+            to: OrderStatus::Confirmed,
+        })
+    )));
+    assert_eq!(
+        orders.order(&OrderId::new("order_1")).unwrap().status(),
+        OrderStatus::Confirmed
+    );
 }
 
 #[tokio::test]

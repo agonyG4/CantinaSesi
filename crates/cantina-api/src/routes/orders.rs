@@ -95,7 +95,7 @@ pub struct OrderItemRequest {
         (status = 400, description = "Invalid request body", body = ErrorResponse),
         (status = 401, description = "Authentication required or invalid token", body = ErrorResponse),
         (status = 403, description = "The caller is not a student", body = ErrorResponse),
-        (status = 409, description = "Product unavailable or pickup-code conflict", body = ErrorResponse),
+        (status = 409, description = "Product unavailable", body = ErrorResponse),
         (status = 422, description = "Order validation error", body = ErrorResponse),
         (status = 500, description = "Internal error", body = ErrorResponse),
     ),

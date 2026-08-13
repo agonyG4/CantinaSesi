@@ -15,7 +15,8 @@ use cantina_core::users::{UserId, UserRole};
 use crate::auth::AuthorizationService;
 use crate::error::ApplicationError;
 use crate::ports::{
-    Clock, IdGenerator, OrderRepository, OrderWriteError, PickupCodeGenerator, ProductRepository,
+    Clock, IdGenerator, OrderRepository, OrderStatusTransitionError, OrderWriteError,
+    PickupCodeGenerator, ProductRepository,
 };
 
 /// Maximum number of pickup-code candidates attempted for one order.
@@ -245,13 +246,11 @@ impl OrderService {
         target: OrderStatus,
     ) -> Result<OrderDto, ApplicationError> {
         AuthorizationService::require_any_role(principal, &[UserRole::Canteen, UserRole::Admin])?;
-        let mut order = self
+        let order = self
             .orders
-            .find_order_by_id(&id)
-            .await?
-            .ok_or_else(|| order_not_found(&id))?;
-        order.change_status(target)?;
-        self.orders.save_order(&order).await?;
+            .transition_order_status(&id, target)
+            .await
+            .map_err(|err| map_status_transition_error(&id, err))?;
         Ok(order.into())
     }
 }
@@ -301,5 +300,21 @@ fn order_not_found(id: &OrderId) -> ApplicationError {
     ApplicationError::NotFound {
         resource: "order",
         id: id.to_string(),
+    }
+}
+
+fn map_status_transition_error(
+    id: &OrderId,
+    error: OrderStatusTransitionError,
+) -> ApplicationError {
+    match error {
+        OrderStatusTransitionError::NotFound => order_not_found(id),
+        OrderStatusTransitionError::InvalidStatusTransition { from, to } => {
+            ApplicationError::InvalidStatusTransition {
+                from: from.to_string(),
+                to: to.to_string(),
+            }
+        }
+        OrderStatusTransitionError::Internal(message) => ApplicationError::Storage(message),
     }
 }

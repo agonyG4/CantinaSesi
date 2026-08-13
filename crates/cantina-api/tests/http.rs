@@ -521,6 +521,62 @@ async fn canteen_can_list_orders_and_apply_domain_status_transitions() {
 }
 
 #[tokio::test]
+async fn concurrent_identical_status_updates_have_one_success_and_one_conflict() {
+    let app = router().await;
+    let student = student_token(&app).await;
+    let canteen = canteen_token(&app).await;
+    let (_, _, created) = authed_request(
+        &app,
+        "POST",
+        "/api/v1/orders",
+        &student,
+        Some(serde_json::json!({
+            "items": [{"product_id": "product_coxinha", "quantity": 1}]
+        })),
+    )
+    .await;
+    let order_id = created["id"].as_str().unwrap();
+    let status_uri = format!("/api/v1/canteen/orders/{order_id}/status");
+
+    let first = authed_request(
+        &app,
+        "PATCH",
+        &status_uri,
+        &canteen,
+        Some(serde_json::json!({"status": "confirmed"})),
+    );
+    let second = authed_request(
+        &app,
+        "PATCH",
+        &status_uri,
+        &canteen,
+        Some(serde_json::json!({"status": "confirmed"})),
+    );
+    let (first, second) = tokio::join!(first, second);
+    let responses = [first, second];
+
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|response| response.0 == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|response| response.0 == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    assert!(
+        responses
+            .iter()
+            .any(|response| { response.2["error"]["code"] == "INVALID_STATUS_TRANSITION" })
+    );
+}
+
+#[tokio::test]
 async fn order_creation_validates_body_quantities_products_and_duplicates() {
     let app = router().await;
     let token = student_token(&app).await;
@@ -843,6 +899,11 @@ async fn openapi_documents_the_complete_orders_surface() {
     assert!(paths["/api/v1/orders"]["post"]["security"].is_array());
     assert!(paths["/api/v1/orders"]["post"]["requestBody"].is_object());
     assert!(paths["/api/v1/orders"]["post"]["responses"]["201"].is_object());
+    assert_eq!(
+        paths["/api/v1/orders"]["post"]["responses"]["409"]["description"],
+        "Product unavailable"
+    );
+    assert!(paths["/api/v1/orders"]["post"]["responses"]["500"].is_object());
     assert!(paths["/api/v1/canteen/orders/{order_id}/status"]["patch"]["requestBody"].is_object());
     assert!(
         paths["/api/v1/canteen/orders/{order_id}/status"]["patch"]["responses"]["409"].is_object()

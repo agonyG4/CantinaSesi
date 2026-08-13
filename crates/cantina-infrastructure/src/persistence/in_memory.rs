@@ -11,11 +11,11 @@ use async_trait::async_trait;
 use secrecy::SecretString;
 
 use cantina_application::ports::{
-    CatalogWriteError, CategoryRepository, OrderRepository, OrderWriteError, PasswordService,
-    ProductRepository, RepositoryError, UserRepository,
+    CatalogWriteError, CategoryRepository, OrderRepository, OrderStatusTransitionError,
+    OrderWriteError, PasswordService, ProductRepository, RepositoryError, UserRepository,
 };
 use cantina_core::catalog::{Category, CategoryId, Product, ProductId};
-use cantina_core::orders::{Order, OrderId};
+use cantina_core::orders::{Order, OrderId, OrderStatus};
 use cantina_core::users::{User, UserId, UserRole, UserStatus};
 
 use super::{InMemoryCredentialRepository, InMemorySessionRepository, Store, lock_store};
@@ -244,9 +244,21 @@ impl OrderRepository for InMemoryOrderRepository {
         Ok(())
     }
 
-    async fn save_order(&self, order: &Order) -> Result<(), RepositoryError> {
-        lock_store(&self.orders)?.insert(order.id().as_str().to_string(), order.clone());
-        Ok(())
+    async fn transition_order_status(
+        &self,
+        id: &OrderId,
+        target: OrderStatus,
+    ) -> Result<Order, OrderStatusTransitionError> {
+        let mut orders = lock_store(&self.orders)
+            .map_err(|err| OrderStatusTransitionError::Internal(err.to_string()))?;
+        let order = orders
+            .get_mut(id.as_str())
+            .ok_or(OrderStatusTransitionError::NotFound)?;
+        let from = order.status();
+        order.change_status(target).map_err(|_| {
+            OrderStatusTransitionError::InvalidStatusTransition { from, to: target }
+        })?;
+        Ok(order.clone())
     }
 
     async fn find_order_by_id(&self, id: &OrderId) -> Result<Option<Order>, RepositoryError> {

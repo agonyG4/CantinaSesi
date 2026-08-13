@@ -14,13 +14,13 @@ use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
 
 use cantina_core::catalog::{Category, CategoryId, Product, ProductId};
-use cantina_core::orders::{Order, OrderId};
+use cantina_core::orders::{Order, OrderId, OrderStatus};
 use cantina_core::users::{User, UserId};
 
 use crate::ports::{
     CatalogWriteError, CategoryRepository, Clock, CredentialRepository, OrderRepository,
-    OrderWriteError, PasswordError, PasswordService, ProductRepository, RepositoryError,
-    SessionRecord, SessionRepository, SessionRotationError, SessionTokenService,
+    OrderStatusTransitionError, OrderWriteError, PasswordError, PasswordService, ProductRepository,
+    RepositoryError, SessionRecord, SessionRepository, SessionRotationError, SessionTokenService,
     StoredPasswordHash, TokenError, UserRepository,
 };
 
@@ -271,12 +271,22 @@ impl OrderRepository for MemOrderRepository {
         Ok(())
     }
 
-    async fn save_order(&self, order: &Order) -> Result<(), RepositoryError> {
-        self.orders
-            .lock()
-            .unwrap()
-            .insert(order.id().as_str().to_string(), order.clone());
-        Ok(())
+    async fn transition_order_status(
+        &self,
+        id: &OrderId,
+        target: OrderStatus,
+    ) -> Result<Order, OrderStatusTransitionError> {
+        let mut orders = self.orders.lock().map_err(|_| {
+            OrderStatusTransitionError::Internal("order store lock poisoned".to_string())
+        })?;
+        let order = orders
+            .get_mut(id.as_str())
+            .ok_or(OrderStatusTransitionError::NotFound)?;
+        let from = order.status();
+        order.change_status(target).map_err(|_| {
+            OrderStatusTransitionError::InvalidStatusTransition { from, to: target }
+        })?;
+        Ok(order.clone())
     }
 
     async fn find_order_by_id(&self, id: &OrderId) -> Result<Option<Order>, RepositoryError> {

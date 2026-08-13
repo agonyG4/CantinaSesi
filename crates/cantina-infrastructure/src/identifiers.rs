@@ -63,7 +63,7 @@ impl IdGenerator for Generator {
 const PICKUP_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const PICKUP_LENGTH: usize = 6;
 
-/// Generates deterministic 4-character pickup codes like `A7F2`.
+/// Generates secure random 6-character pickup codes like `A7F2B7`.
 pub struct DefaultPickupCodeGenerator {}
 
 impl DefaultPickupCodeGenerator {
