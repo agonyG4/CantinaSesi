@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#d92323" />
+    <title>Sabor Digital | Cantina SESI</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#inicio" aria-label="Sabor Digital - início">
+        <span class="brand-mark" aria-hidden="true">S</span><span>Sabor Digital</span>
+      </a>
+      <nav class="main-nav" aria-label="Navegação principal">
+        <a class="nav-link active" href="#inicio" aria-current="page">Início</a>
+        <a class="nav-link" href="#cardapio">Cardápio</a>
+        <a class="nav-link" href="#como-funciona">Como funciona</a>
+      </nav>
+      <div class="header-actions">
+        <a class="button button-cart" href="#carrinho">Carrinho</a>
+        <a class="button button-red" href="/login">Entrar</a>
+        <a class="button button-red" href="/cadastro">Cadastrar-se</a>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero" id="inicio" aria-labelledby="hero-title">
+        <div class="hero-shape hero-shape-top" aria-hidden="true"></div>
+        <div class="hero-shape hero-shape-bottom" aria-hidden="true">
+          <span class="student-badge">EXCLUSIVO PARA ALUNOS CADASTRADOS</span>
+        </div>
+        <div class="hero-copy">
+          <p class="eyebrow">SEU INTERVALO</p>
+          <h1 id="hero-title">comece no pedido,<br />não na fila.</h1>
+          <p class="hero-description">Escolha o lanche antes do sinal, e retire quando estiver<br class="desktop-break" /> pronto.</p>
+          <a class="button button-menu" href="#cardapio">Ver cardápio</a>
+        </div>
+        <div class="promo-area" aria-label="Retire seu lanche sem fila">
+          <div class="promo-card">
+            <img id="hero-burger" src="/assets/burger.svg" alt="Hambúrguer com pão de gergelim, alface, tomate, cebola, queijo, carne e pão inferior" />
+            <p>RETIRE SEM FILA</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="steps-section" id="como-funciona" aria-label="Como funciona">
+        <div class="steps-card">
+          <article class="step"><span class="step-number">1</span><div><h2>ANTES DO SINAL</h2><p>Monte o pedido em poucos passos.</p></div></article>
+          <span class="step-divider" aria-hidden="true"></span>
+          <article class="step step-highlight"><span class="step-number">2</span><div><h2>DURANTE O PREPARO</h2><p>Acompanhe o status em tempo real.</p></div></article>
+          <span class="step-divider" aria-hidden="true"></span>
+          <article class="step"><span class="step-number">3</span><div><h2>QUANDO FICAR PRONTO</h2><p>Retire direto no balcão.</p></div></article>
+        </div>
+      </section>
+
+      <section class="menu-preview section-shell" id="cardapio" aria-labelledby="menu-title">
+        <div class="section-heading">
+          <h2 id="menu-title">O que costuma sair primeiro</h2>
+          <p>Uma prévia do cardápio de hoje. Itens e valores podem mudar conforme a disponibilidade.</p>
+        </div>
+        <div class="product-grid">
+          <article class="product-card">
+            <div class="product-image product-image-buns"><img id="buns-image" src="/assets/burger.svg" alt="Pães dourados recém-assados" /></div>
+            <span class="product-tag tag-red">MAIS PEDIDO</span>
+            <h3>Hamburgão duplo</h3>
+            <p>Pão, carne, molho e bacon.</p>
+            <div class="product-footer"><strong>R$ 9,00</strong><button class="add-button add-red" type="button">Adicionar</button></div>
+          </article>
+          <article class="product-card">
+            <div class="product-image product-image-cheese"><img id="cheese-image" src="/assets/burger.svg" alt="Pães de queijo dourados" /></div>
+            <span class="product-tag tag-yellow">RÁPIDO</span>
+            <h3>Pão de queijo</h3>
+            <p>&nbsp;</p>
+            <div class="product-footer"><strong>R$ 4,50</strong><button class="add-button add-yellow" type="button">Adicionar</button></div>
+          </article>
+          <article class="product-card">
+            <div class="product-image product-image-juice"><img id="juice-image" src="/assets/burger.svg" alt="Garrafa de suco de laranja" /></div>
+            <span class="product-tag tag-black">BEBIDA</span>
+            <h3>Suco de laranja</h3>
+            <p>300ml</p>
+            <div class="product-footer"><strong>R$ 4,00</strong><button class="add-button add-red" type="button">Adicionar</button></div>
+          </article>
+        </div>
+        <a class="full-menu-button" href="#cardapio">Abrir cardápio completo</a>
+      </section>
+
+      <section class="how-section section-shell" aria-labelledby="how-title">
+        <div class="section-heading">
+          <span class="section-kicker">COMO FUNCIONA</span>
+          <h2 id="how-title">Três passos. Sem enrolação.</h2>
+          <p>O fluxo foi pensado para caber no intervalo sem confundir aluno nem cantina.</p>
+        </div>
+        <div class="how-grid">
+          <article class="how-card how-card-light"><strong>01</strong><h3>Escolha antes do intervalo</h3><p>Veja os itens disponíveis e monte o pedido.</p><span></span></article>
+          <article class="how-card how-card-red"><strong>02</strong><h3>Acompanhe o preparo</h3><p>O status muda conforme a cantina prepara.</p><span></span></article>
+          <article class="how-card how-card-light"><strong>03</strong><h3>Retire quando estiver pronto</h3><p>Vá direto ao balcão e retire seu pedido.</p><span></span></article>
+        </div>
+      </section>
+
+      <section class="tracking-section section-shell" aria-labelledby="tracking-title">
+        <div class="section-heading">
+          <h2 id="tracking-title">Veja exatamente o que acontece depois de confirmar</h2>
+          <p>Uma prévia do acompanhamento que o aluno verá durante o intervalo.</p>
+        </div>
+        <div class="tracking-panel">
+          <div class="tracking-order">
+            <span class="tracking-kicker">PEDIDO EM ANDAMENTO</span>
+            <h3>Pedido #67</h3>
+            <p class="tracking-items">Hamburgão duplo&nbsp;&nbsp; + Suco de laranja</p>
+            <span class="status-pill">EM PREPARO</span>
+            <span class="pickup-label">Previsão de retirada</span>
+            <strong class="pickup-time">8 minutos</strong>
+          </div>
+          <div class="tracking-status">
+            <div class="progress-line"><span class="progress-fill"></span><i class="progress-step is-done">1</i><i class="progress-step is-current">2</i><i class="progress-step">3</i></div>
+            <div class="progress-labels"><span>Pedido confirmado</span><span>Em preparo</span><span>Pronto para retirada</span></div>
+            <div class="pickup-card"><strong>Retirada na cantina</strong><p>Quando o status mudar para “pronto”, vá direto ao balcão e mostre o número do pedido.</p><button class="button button-red" type="button">Ver meu pedido</button></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="benefits-section section-shell" aria-labelledby="benefits-title">
+        <div class="section-heading">
+          <h2 id="benefits-title">Feito para a rotina da escola</h2>
+          <p>O sistema não muda a cantina. Ele organiza o caminho até o lanche.</p>
+        </div>
+        <div class="benefits-grid">
+          <article class="benefit-card benefit-yellow"><h3>Menos fila</h3><p>Mais tempo de intervalo para os alunos.</p><span></span></article>
+          <article class="benefit-card"><h3>Mais organização</h3><p>Pedidos chegam em uma única sequência.</p><span></span></article>
+          <article class="benefit-card"><h3>Mais previsibilidade</h3><p>Todo mundo sabe quando o pedido fica pronto.</p><span></span></article>
+        </div>
+        <div class="closing-card"><h3>Quando o sinal tocar, seu pedido já pode estar pronto.</h3><p>Peça antes do intervalo e acompanhe o preparo pelo navegador.</p></div>
+      </section>
+
+      <section class="final-cta" aria-labelledby="cta-title">
+        <div><h2 id="cta-title">Seu intervalo começa melhor sem uma fila enorme.</h2><p>Acesso exclusivo para alunos cadastrados.</p></div>
+        <a class="button button-cart" href="/login">Entrar com matrícula</a>
+      </section>
+
+      <footer class="site-footer">
+        <div><strong>Sabor Digital</strong><span>Cantina digital do SESI/SENAI</span></div>
+        <div><b>Horário da cantina</b><span>Intervalos escolares</span></div>
+        <div><b>Acesso</b><span>Exclusivo para cadastrados</span></div>
+      </footer>
+      <span id="carrinho" class="anchor-target" aria-hidden="true"></span>
+    </main>
+    <script type="module" src="/script.js"></script>
+  </body>
+</html>
