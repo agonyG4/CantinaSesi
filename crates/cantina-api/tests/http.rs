@@ -37,6 +37,13 @@ impl ProductRepository for FailingProductRepository {
         Err(RepositoryError::new("injected storage failure"))
     }
 
+    async fn find_products_by_ids(
+        &self,
+        _ids: &[ProductId],
+    ) -> Result<Vec<Product>, RepositoryError> {
+        Err(RepositoryError::new("injected storage failure"))
+    }
+
     async fn list_products(&self) -> Result<Vec<Product>, RepositoryError> {
         Err(RepositoryError::new("injected storage failure"))
     }
@@ -261,6 +268,10 @@ async fn student_token(router: &axum::Router<()>) -> String {
     json["access_token"].as_str().unwrap().to_string()
 }
 
+async fn student_two_token(router: &axum::Router<()>) -> String {
+    token_for(router, "bruno@example.com", "StudentTwoDemo!2026").await
+}
+
 async fn raw_authenticated_get(
     router: &axum::Router<()>,
     uri: &str,
@@ -341,6 +352,262 @@ async fn unknown_route_returns_not_found() {
 }
 
 #[tokio::test]
+async fn student_can_create_list_and_read_own_order() {
+    let app = router().await;
+    let token = student_token(&app).await;
+    let (status, headers, created) = authed_request(
+        &app,
+        "POST",
+        "/api/v1/orders",
+        &token,
+        Some(serde_json::json!({
+            "items": [{"product_id": "product_coxinha", "quantity": 2}]
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(
+        headers["location"]
+            .to_str()
+            .unwrap()
+            .contains("/api/v1/orders/")
+    );
+    assert_eq!(created["status"], "pending");
+    assert_eq!(created["items"][0]["quantity"], 2);
+    assert!(created["pickup_code"].is_string());
+
+    let order_id = created["id"].as_str().unwrap();
+    let (status, _, history) = authed_request(&app, "GET", "/api/v1/orders", &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(history["items"].as_array().unwrap().len(), 1);
+
+    let (status, _, detail) = authed_request(
+        &app,
+        "GET",
+        &format!("/api/v1/orders/{order_id}"),
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["id"], order_id);
+    assert_eq!(detail["pickup_code"], created["pickup_code"]);
+}
+
+#[tokio::test]
+async fn student_cannot_read_another_students_order_or_pickup_code() {
+    let app = router().await;
+    let owner = student_token(&app).await;
+    let other_student = student_two_token(&app).await;
+    let (_, _, created) = authed_request(
+        &app,
+        "POST",
+        "/api/v1/orders",
+        &owner,
+        Some(serde_json::json!({
+            "items": [{"product_id": "product_coxinha", "quantity": 1}]
+        })),
+    )
+    .await;
+    let order_id = created["id"].as_str().unwrap();
+    let pickup_code = created["pickup_code"].as_str().unwrap().to_string();
+
+    let (status, _, detail) = authed_request(
+        &app,
+        "GET",
+        &format!("/api/v1/orders/{order_id}"),
+        &other_student,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_ne!(detail["error"]["message"], pickup_code);
+    assert!(detail.get("pickup_code").is_none());
+
+    let (status, _, history) =
+        authed_request(&app, "GET", "/api/v1/orders", &other_student, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(history["items"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn students_cannot_access_canteen_queue_or_change_status() {
+    let app = router().await;
+    let token = student_token(&app).await;
+    let (status, _, queue) =
+        authed_request(&app, "GET", "/api/v1/canteen/orders", &token, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(queue["error"]["code"], "FORBIDDEN");
+
+    let (status, _, detail) = authed_request(
+        &app,
+        "GET",
+        "/api/v1/canteen/orders/order_missing",
+        &token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(detail["error"]["code"], "FORBIDDEN");
+
+    let (status, _, response) = authed_request(
+        &app,
+        "PATCH",
+        "/api/v1/canteen/orders/order_missing/status",
+        &token,
+        Some(serde_json::json!({"status": "confirmed"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(response["error"]["code"], "FORBIDDEN");
+}
+
+#[tokio::test]
+async fn canteen_can_list_orders_and_apply_domain_status_transitions() {
+    let app = router().await;
+    let student = student_token(&app).await;
+    let canteen = canteen_token(&app).await;
+    let (_, _, created) = authed_request(
+        &app,
+        "POST",
+        "/api/v1/orders",
+        &student,
+        Some(serde_json::json!({
+            "items": [{"product_id": "product_coxinha", "quantity": 1}]
+        })),
+    )
+    .await;
+    let order_id = created["id"].as_str().unwrap();
+
+    let (status, _, queue) =
+        authed_request(&app, "GET", "/api/v1/canteen/orders", &canteen, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(queue["items"].as_array().unwrap().len(), 1);
+    assert_eq!(queue["items"][0]["pickup_code"], created["pickup_code"]);
+
+    let (status, _, canteen_detail) = authed_request(
+        &app,
+        "GET",
+        &format!("/api/v1/canteen/orders/{order_id}"),
+        &canteen,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(canteen_detail["id"], order_id);
+
+    let (status, _, updated) = authed_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/canteen/orders/{order_id}/status"),
+        &canteen,
+        Some(serde_json::json!({"status": "confirmed"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["status"], "confirmed");
+
+    let (status, _, invalid) = authed_request(
+        &app,
+        "PATCH",
+        &format!("/api/v1/canteen/orders/{order_id}/status"),
+        &canteen,
+        Some(serde_json::json!({"status": "ready"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(invalid["error"]["code"], "INVALID_STATUS_TRANSITION");
+}
+
+#[tokio::test]
+async fn order_creation_validates_body_quantities_products_and_duplicates() {
+    let app = router().await;
+    let token = student_token(&app).await;
+
+    let (status, _, empty) = authed_request(
+        &app,
+        "POST",
+        "/api/v1/orders",
+        &token,
+        Some(serde_json::json!({"items": []})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(empty["error"]["code"], "EMPTY_ORDER");
+
+    let (status, _, invalid_quantity) = authed_request(
+        &app,
+        "POST",
+        "/api/v1/orders",
+        &token,
+        Some(serde_json::json!({
+            "items": [{"product_id": "product_coxinha", "quantity": 0}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(invalid_quantity["error"]["code"], "INVALID_QUANTITY");
+
+    let (status, _, missing) = authed_request(
+        &app,
+        "POST",
+        "/api/v1/orders",
+        &token,
+        Some(serde_json::json!({
+            "items": [{"product_id": "product_missing", "quantity": 1}]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(missing["error"]["code"], "PRODUCT_UNAVAILABLE");
+
+    let (status, _, duplicate) = authed_request(
+        &app,
+        "POST",
+        "/api/v1/orders",
+        &token,
+        Some(serde_json::json!({
+            "items": [
+                {"product_id": "product_coxinha", "quantity": 2},
+                {"product_id": "product_coxinha", "quantity": 3}
+            ]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(duplicate["items"].as_array().unwrap().len(), 1);
+    assert_eq!(duplicate["items"][0]["quantity"], 5);
+}
+
+#[tokio::test]
+async fn orders_require_authentication() {
+    let app = router().await;
+    let (status, _, body) = raw_get("/api/v1/orders").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "AUTHENTICATION_REQUIRED");
+
+    let (parts, body) = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/orders")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"items": []}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_parts();
+    let bytes = body.collect().await.unwrap().to_bytes();
+    assert_eq!(parts.status, StatusCode::UNAUTHORIZED);
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["error"]["code"], "AUTHENTICATION_REQUIRED");
+}
+
+#[tokio::test]
 async fn seeded_product_is_returned() {
     let (status, _, json) = get("/api/v1/products/product_brigadeiro").await;
     assert_eq!(status, StatusCode::OK);
@@ -367,7 +634,10 @@ async fn missing_product_returns_centralized_error() {
 
 #[tokio::test]
 async fn missing_order_returns_centralized_error() {
-    let (status, _, json) = get("/api/v1/orders/order_missing").await;
+    let app = router().await;
+    let token = student_token(&app).await;
+    let (status, _, json) =
+        authed_request(&app, "GET", "/api/v1/orders/order_missing", &token, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(json["error"]["code"], "NOT_FOUND");
 }
@@ -541,12 +811,42 @@ async fn openapi_document_describes_expected_schemas() {
         "CategoryListResponse",
         "ErrorResponse",
         "ErrorBody",
+        "CreateOrderRequest",
+        "OrderItemRequest",
+        "OrderItemResponse",
+        "OrderResponse",
+        "OrderListResponse",
+        "ChangeOrderStatusRequest",
     ] {
         assert!(
             schemas.contains_key(schema),
             "missing OpenAPI schema: {schema}"
         );
     }
+}
+
+#[tokio::test]
+async fn openapi_documents_the_complete_orders_surface() {
+    let (_, _, json) = get("/api/openapi.json").await;
+    let paths = json["paths"].as_object().unwrap();
+    for path in [
+        "/api/v1/orders",
+        "/api/v1/orders/{order_id}",
+        "/api/v1/canteen/orders",
+        "/api/v1/canteen/orders/{order_id}/status",
+    ] {
+        assert!(
+            paths.contains_key(path),
+            "missing OpenAPI order path: {path}"
+        );
+    }
+    assert!(paths["/api/v1/orders"]["post"]["security"].is_array());
+    assert!(paths["/api/v1/orders"]["post"]["requestBody"].is_object());
+    assert!(paths["/api/v1/orders"]["post"]["responses"]["201"].is_object());
+    assert!(paths["/api/v1/canteen/orders/{order_id}/status"]["patch"]["requestBody"].is_object());
+    assert!(
+        paths["/api/v1/canteen/orders/{order_id}/status"]["patch"]["responses"]["409"].is_object()
+    );
 }
 
 #[tokio::test]

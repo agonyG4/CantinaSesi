@@ -109,6 +109,42 @@ impl From<ApplicationError> for ApiError {
                 "item quantity must be greater than zero".to_string(),
                 false,
             ),
+            ApplicationError::TooManyOrderLines => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "TOO_MANY_ORDER_LINES",
+                "an order contains too many distinct items".to_string(),
+                false,
+            ),
+            ApplicationError::QuantityLimitExceeded => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "QUANTITY_LIMIT_EXCEEDED",
+                "the quantity for a product exceeds the order limit".to_string(),
+                false,
+            ),
+            ApplicationError::TotalQuantityLimitExceeded => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "TOTAL_QUANTITY_LIMIT_EXCEEDED",
+                "the total order quantity exceeds the order limit".to_string(),
+                false,
+            ),
+            ApplicationError::OrderTotalOverflow => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "ORDER_TOTAL_OVERFLOW",
+                "the order total is too large".to_string(),
+                false,
+            ),
+            ApplicationError::PickupCodeGenerationExhausted => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "PICKUP_CODE_GENERATION_FAILED",
+                "internal server error".to_string(),
+                false,
+            ),
+            ApplicationError::PickupCodeGenerationFailed => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "internal server error".to_string(),
+                false,
+            ),
             ApplicationError::InvalidStatusTransition { from, to } => (
                 StatusCode::CONFLICT,
                 "INVALID_STATUS_TRANSITION",

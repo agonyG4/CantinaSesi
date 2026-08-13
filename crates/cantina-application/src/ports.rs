@@ -227,6 +227,12 @@ pub trait ProductRepository: Send + Sync {
     /// Finds a product by its identifier.
     async fn find_product_by_id(&self, id: &ProductId) -> Result<Option<Product>, RepositoryError>;
 
+    /// Finds all products for the supplied identifiers in one logical read.
+    async fn find_products_by_ids(
+        &self,
+        ids: &[ProductId],
+    ) -> Result<Vec<Product>, RepositoryError>;
+
     /// Lists every known product regardless of availability.
     ///
     /// Availability filtering is an application rule owned by the use case,
@@ -297,9 +303,26 @@ pub enum CatalogWriteError {
     Internal(String),
 }
 
+/// Failure while inserting a new order while enforcing order uniqueness.
+#[derive(Debug, Error)]
+pub enum OrderWriteError {
+    /// The generated pickup code is already assigned to another order.
+    #[error("the pickup code is already in use")]
+    PickupCodeConflict,
+    /// The generated order identifier is already assigned to another order.
+    #[error("the order identifier already exists")]
+    IdentifierConflict,
+    /// The repository failed internally.
+    #[error("storage failure: {0}")]
+    Internal(String),
+}
+
 /// Repository for [`Order`] aggregates.
 #[async_trait]
 pub trait OrderRepository: Send + Sync {
+    /// Atomically inserts a new order and enforces order/pickup-code uniqueness.
+    async fn save_new_order(&self, order: &Order) -> Result<(), OrderWriteError>;
+
     /// Persists an order (insert or update).
     async fn save_order(&self, order: &Order) -> Result<(), RepositoryError>;
 
@@ -338,7 +361,15 @@ pub trait IdGenerator: Send + Sync {
 }
 
 /// Generates short pickup codes for orders.
+#[derive(Debug, Error)]
+pub enum PickupCodeGenerationError {
+    /// The operating system random source failed.
+    #[error("secure pickup-code generation failed")]
+    Randomness,
+}
+
+/// Generates short pickup codes for orders.
 pub trait PickupCodeGenerator: Send + Sync {
     /// Generates a new pickup code.
-    fn generate(&self) -> PickupCode;
+    fn generate(&self) -> Result<PickupCode, PickupCodeGenerationError>;
 }

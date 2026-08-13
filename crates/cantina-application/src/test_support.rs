@@ -19,9 +19,9 @@ use cantina_core::users::{User, UserId};
 
 use crate::ports::{
     CatalogWriteError, CategoryRepository, Clock, CredentialRepository, OrderRepository,
-    PasswordError, PasswordService, ProductRepository, RepositoryError, SessionRecord,
-    SessionRepository, SessionRotationError, SessionTokenService, StoredPasswordHash, TokenError,
-    UserRepository,
+    OrderWriteError, PasswordError, PasswordService, ProductRepository, RepositoryError,
+    SessionRecord, SessionRepository, SessionRotationError, SessionTokenService,
+    StoredPasswordHash, TokenError, UserRepository,
 };
 
 #[derive(Default)]
@@ -63,6 +63,7 @@ impl UserRepository for MemUserRepository {
 pub struct MemProductRepository {
     products: Mutex<HashMap<String, Product>>,
     fail_writes: AtomicBool,
+    bulk_find_calls: AtomicU64,
 }
 
 impl MemProductRepository {
@@ -81,12 +82,28 @@ impl MemProductRepository {
     pub fn fail_writes(&self) {
         self.fail_writes.store(true, Ordering::SeqCst);
     }
+
+    pub fn bulk_find_calls(&self) -> u64 {
+        self.bulk_find_calls.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
 impl ProductRepository for MemProductRepository {
     async fn find_product_by_id(&self, id: &ProductId) -> Result<Option<Product>, RepositoryError> {
         Ok(self.products.lock().unwrap().get(id.as_str()).cloned())
+    }
+
+    async fn find_products_by_ids(
+        &self,
+        ids: &[ProductId],
+    ) -> Result<Vec<Product>, RepositoryError> {
+        self.bulk_find_calls.fetch_add(1, Ordering::SeqCst);
+        let products = self.products.lock().unwrap();
+        Ok(ids
+            .iter()
+            .filter_map(|id| products.get(id.as_str()).cloned())
+            .collect())
     }
 
     async fn list_products(&self) -> Result<Vec<Product>, RepositoryError> {
@@ -225,10 +242,35 @@ impl MemOrderRepository {
     pub fn order(&self, id: &OrderId) -> Option<Order> {
         self.orders.lock().unwrap().get(id.as_str()).cloned()
     }
+
+    pub fn insert(&self, order: Order) {
+        self.orders
+            .lock()
+            .unwrap()
+            .insert(order.id().as_str().to_string(), order);
+    }
 }
 
 #[async_trait]
 impl OrderRepository for MemOrderRepository {
+    async fn save_new_order(&self, order: &Order) -> Result<(), OrderWriteError> {
+        let mut orders = self
+            .orders
+            .lock()
+            .map_err(|_| OrderWriteError::Internal("order store lock poisoned".to_string()))?;
+        if orders.contains_key(order.id().as_str()) {
+            return Err(OrderWriteError::IdentifierConflict);
+        }
+        if orders
+            .values()
+            .any(|existing| existing.pickup_code() == order.pickup_code())
+        {
+            return Err(OrderWriteError::PickupCodeConflict);
+        }
+        orders.insert(order.id().as_str().to_string(), order.clone());
+        Ok(())
+    }
+
     async fn save_order(&self, order: &Order) -> Result<(), RepositoryError> {
         self.orders
             .lock()
@@ -245,25 +287,38 @@ impl OrderRepository for MemOrderRepository {
         &self,
         student_id: &UserId,
     ) -> Result<Vec<Order>, RepositoryError> {
-        Ok(self
+        let mut orders: Vec<Order> = self
             .orders
             .lock()
             .unwrap()
             .values()
             .filter(|order| order.student_id() == student_id)
             .cloned()
-            .collect())
+            .collect();
+        orders.sort_by(|left, right| {
+            right
+                .created_at()
+                .cmp(&left.created_at())
+                .then_with(|| left.id().as_str().cmp(right.id().as_str()))
+        });
+        Ok(orders)
     }
 
     async fn list_active_canteen_orders(&self) -> Result<Vec<Order>, RepositoryError> {
-        Ok(self
+        let mut orders: Vec<Order> = self
             .orders
             .lock()
             .unwrap()
             .values()
             .filter(|order| order.status().is_active())
             .cloned()
-            .collect())
+            .collect();
+        orders.sort_by(|left, right| {
+            left.created_at()
+                .cmp(&right.created_at())
+                .then_with(|| left.id().as_str().cmp(right.id().as_str()))
+        });
+        Ok(orders)
     }
 }
 

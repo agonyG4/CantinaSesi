@@ -2,7 +2,10 @@
 
 use thiserror::Error;
 
-use crate::ports::{CatalogWriteError, RepositoryError, SessionRotationError};
+use crate::ports::{
+    CatalogWriteError, OrderWriteError, PickupCodeGenerationError, RepositoryError,
+    SessionRotationError,
+};
 
 /// Error returned by application use cases.
 ///
@@ -24,6 +27,30 @@ pub enum ApplicationError {
     /// An item quantity is not valid.
     #[error("item quantity must be greater than zero")]
     InvalidQuantity,
+
+    /// The order contains too many distinct product lines.
+    #[error("an order cannot contain more than 20 distinct items")]
+    TooManyOrderLines,
+
+    /// A product quantity exceeds the cafeteria limit.
+    #[error("the quantity for a product cannot exceed 20")]
+    QuantityLimitExceeded,
+
+    /// The total quantity exceeds the cafeteria limit.
+    #[error("an order cannot contain more than 100 items in total")]
+    TotalQuantityLimitExceeded,
+
+    /// The trusted monetary total overflowed its representation.
+    #[error("the order total is too large")]
+    OrderTotalOverflow,
+
+    /// No unique pickup code could be allocated after bounded retries.
+    #[error("a pickup code could not be generated")]
+    PickupCodeGenerationExhausted,
+
+    /// The secure random source failed while generating a pickup code.
+    #[error("a pickup code could not be generated")]
+    PickupCodeGenerationFailed,
 
     /// The requested order status change is not allowed.
     #[error("cannot transition order from '{from}' to '{to}'")]
@@ -127,11 +154,30 @@ impl From<cantina_core::orders::OrderError> for ApplicationError {
         match err {
             OrderError::EmptyOrder => Self::EmptyOrder,
             OrderError::InvalidQuantity => Self::InvalidQuantity,
+            OrderError::TotalOverflow => Self::OrderTotalOverflow,
             OrderError::InvalidStatusTransition { from, to } => Self::InvalidStatusTransition {
                 from: from.to_string(),
                 to: to.to_string(),
             },
         }
+    }
+}
+
+impl From<OrderWriteError> for ApplicationError {
+    fn from(err: OrderWriteError) -> Self {
+        match err {
+            OrderWriteError::PickupCodeConflict => Self::PickupCodeGenerationExhausted,
+            OrderWriteError::IdentifierConflict => {
+                Self::Storage("generated order identifier conflict".to_string())
+            }
+            OrderWriteError::Internal(message) => Self::Storage(message),
+        }
+    }
+}
+
+impl From<PickupCodeGenerationError> for ApplicationError {
+    fn from(_: PickupCodeGenerationError) -> Self {
+        Self::PickupCodeGenerationFailed
     }
 }
 
