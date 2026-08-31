@@ -11,11 +11,11 @@ use async_trait::async_trait;
 use secrecy::SecretString;
 
 use cantina_application::ports::{
-    CatalogWriteError, CategoryRepository, OrderRepository, OrderStatusTransitionError,
-    OrderWriteError, PasswordService, ProductRepository, RepositoryError, UserRepository,
+    CatalogWriteError, CategoryRepository, OrderRepository, PasswordService, ProductRepository,
+    RepositoryError, UserRepository,
 };
 use cantina_core::catalog::{Category, CategoryId, Product, ProductId};
-use cantina_core::orders::{Order, OrderId, OrderStatus};
+use cantina_core::orders::{Order, OrderId};
 use cantina_core::users::{User, UserId, UserRole, UserStatus};
 
 use super::{InMemoryCredentialRepository, InMemorySessionRepository, Store, lock_store};
@@ -90,17 +90,6 @@ impl Default for InMemoryProductRepository {
 impl ProductRepository for InMemoryProductRepository {
     async fn find_product_by_id(&self, id: &ProductId) -> Result<Option<Product>, RepositoryError> {
         Ok(lock_store(&self.products)?.get(id.as_str()).cloned())
-    }
-
-    async fn find_products_by_ids(
-        &self,
-        ids: &[ProductId],
-    ) -> Result<Vec<Product>, RepositoryError> {
-        let products = lock_store(&self.products)?;
-        Ok(ids
-            .iter()
-            .filter_map(|id| products.get(id.as_str()).cloned())
-            .collect())
     }
 
     async fn list_products(&self) -> Result<Vec<Product>, RepositoryError> {
@@ -228,37 +217,9 @@ impl Default for InMemoryOrderRepository {
 
 #[async_trait]
 impl OrderRepository for InMemoryOrderRepository {
-    async fn save_new_order(&self, order: &Order) -> Result<(), OrderWriteError> {
-        let mut orders = lock_store(&self.orders)
-            .map_err(|_| OrderWriteError::Internal("order store lock poisoned".to_string()))?;
-        if orders.contains_key(order.id().as_str()) {
-            return Err(OrderWriteError::IdentifierConflict);
-        }
-        if orders
-            .values()
-            .any(|existing| existing.pickup_code() == order.pickup_code())
-        {
-            return Err(OrderWriteError::PickupCodeConflict);
-        }
-        orders.insert(order.id().as_str().to_string(), order.clone());
+    async fn save_order(&self, order: &Order) -> Result<(), RepositoryError> {
+        lock_store(&self.orders)?.insert(order.id().as_str().to_string(), order.clone());
         Ok(())
-    }
-
-    async fn transition_order_status(
-        &self,
-        id: &OrderId,
-        target: OrderStatus,
-    ) -> Result<Order, OrderStatusTransitionError> {
-        let mut orders = lock_store(&self.orders)
-            .map_err(|err| OrderStatusTransitionError::Internal(err.to_string()))?;
-        let order = orders
-            .get_mut(id.as_str())
-            .ok_or(OrderStatusTransitionError::NotFound)?;
-        let from = order.status();
-        order.change_status(target).map_err(|_| {
-            OrderStatusTransitionError::InvalidStatusTransition { from, to: target }
-        })?;
-        Ok(order.clone())
     }
 
     async fn find_order_by_id(&self, id: &OrderId) -> Result<Option<Order>, RepositoryError> {
@@ -269,32 +230,19 @@ impl OrderRepository for InMemoryOrderRepository {
         &self,
         student_id: &UserId,
     ) -> Result<Vec<Order>, RepositoryError> {
-        let mut orders: Vec<Order> = lock_store(&self.orders)?
+        Ok(lock_store(&self.orders)?
             .values()
             .filter(|order| order.student_id() == student_id)
             .cloned()
-            .collect();
-        orders.sort_by(|left, right| {
-            right
-                .created_at()
-                .cmp(&left.created_at())
-                .then_with(|| left.id().as_str().cmp(right.id().as_str()))
-        });
-        Ok(orders)
+            .collect())
     }
 
     async fn list_active_canteen_orders(&self) -> Result<Vec<Order>, RepositoryError> {
-        let mut orders: Vec<Order> = lock_store(&self.orders)?
+        Ok(lock_store(&self.orders)?
             .values()
             .filter(|order| order.status().is_active())
             .cloned()
-            .collect();
-        orders.sort_by(|left, right| {
-            left.created_at()
-                .cmp(&right.created_at())
-                .then_with(|| left.id().as_str().cmp(right.id().as_str()))
-        });
-        Ok(orders)
+            .collect())
     }
 }
 
@@ -394,16 +342,6 @@ impl InMemoryRepositories {
                 UserRole::Student,
                 UserStatus::Active,
                 "StudentDemo!2026",
-            )
-            .await?;
-        repos
-            .insert_demo_user(
-                "user_student_2",
-                "Bruno Lima",
-                "bruno@example.com",
-                UserRole::Student,
-                UserStatus::Active,
-                "StudentTwoDemo!2026",
             )
             .await?;
         repos

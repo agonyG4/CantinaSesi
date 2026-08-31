@@ -7,14 +7,10 @@ use axum::Json;
 use utoipa::OpenApi;
 
 use super::auth::{AuthenticationResponse, LoginRequest, UserResponse};
-use super::canteen::ChangeOrderStatusRequest;
 use super::categories::{
     CategoryListResponse, CategoryResponse, CreateCategoryRequest, UpdateCategoryRequest,
 };
 use super::health::HealthResponse;
-use super::orders::{
-    CreateOrderRequest, OrderItemRequest, OrderItemResponse, OrderListResponse, OrderResponse,
-};
 use super::products::{
     CreateProductRequest, ListProductsParams, ProductListResponse, ProductResponse,
     SetProductAvailabilityRequest, UpdateProductRequest,
@@ -45,12 +41,6 @@ use crate::error::{ErrorBody, ErrorResponse};
         super::categories::get_category,
         super::categories::create_category,
         super::categories::update_category,
-        super::orders::create_order,
-        super::orders::list_orders,
-        super::orders::get_order,
-        super::canteen::list_orders,
-        super::canteen::get_order,
-        super::canteen::update_status,
     ),
     components(schemas(
         HealthResponse,
@@ -67,12 +57,6 @@ use crate::error::{ErrorBody, ErrorResponse};
         CategoryListResponse,
         CreateCategoryRequest,
         UpdateCategoryRequest,
-        CreateOrderRequest,
-        OrderItemRequest,
-        OrderItemResponse,
-        OrderResponse,
-        OrderListResponse,
-        ChangeOrderStatusRequest,
         ErrorResponse,
         ErrorBody,
     )),

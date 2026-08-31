@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cantina_application::ports::{IdGenerator, PickupCodeGenerationError, PickupCodeGenerator};
+use cantina_application::ports::{IdGenerator, PickupCodeGenerator};
 use cantina_core::catalog::{CategoryId, ProductId};
 use cantina_core::orders::{OrderId, PickupCode};
 use cantina_core::users::UserId;
@@ -61,32 +61,30 @@ impl IdGenerator for Generator {
 
 /// Alphabet that avoids ambiguous characters (no `I`, `O`, `0`, `1`).
 const PICKUP_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const PICKUP_LENGTH: usize = 6;
+const PICKUP_LENGTH: usize = 4;
 
-/// Generates secure random 6-character pickup codes like `A7F2B7`.
-pub struct DefaultPickupCodeGenerator {}
+/// Generates deterministic 4-character pickup codes like `A7F2`.
+pub struct DefaultPickupCodeGenerator {
+    counter: AtomicU64,
+}
 
 impl DefaultPickupCodeGenerator {
     /// Creates a pickup-code generator.
     pub fn new() -> Self {
-        Self {}
+        Self {
+            counter: AtomicU64::new(0),
+        }
     }
 
-    fn generate_code(&self) -> Result<String, PickupCodeGenerationError> {
+    fn generate_code(&self) -> String {
+        let mut value = self.counter.fetch_add(1, Ordering::Relaxed);
         let mut code = String::with_capacity(PICKUP_LENGTH);
         for _ in 0..PICKUP_LENGTH {
-            let index = loop {
-                let mut byte = [0_u8; 1];
-                getrandom::getrandom(&mut byte)
-                    .map_err(|_| PickupCodeGenerationError::Randomness)?;
-                let limit = u8::MAX - (u8::MAX % PICKUP_ALPHABET.len() as u8);
-                if byte[0] < limit {
-                    break usize::from(byte[0] % PICKUP_ALPHABET.len() as u8);
-                }
-            };
+            let index = (value % PICKUP_ALPHABET.len() as u64) as usize;
             code.push(char::from(PICKUP_ALPHABET[index]));
+            value /= PICKUP_ALPHABET.len() as u64;
         }
-        Ok(code)
+        code
     }
 }
 
@@ -97,8 +95,8 @@ impl Default for DefaultPickupCodeGenerator {
 }
 
 impl PickupCodeGenerator for DefaultPickupCodeGenerator {
-    fn generate(&self) -> Result<PickupCode, PickupCodeGenerationError> {
-        self.generate_code().map(PickupCode::new)
+    fn generate(&self) -> PickupCode {
+        PickupCode::new(self.generate_code())
     }
 }
 
@@ -117,16 +115,11 @@ mod tests {
     }
 
     #[test]
-    fn pickup_codes_are_six_characters_from_the_human_friendly_alphabet() {
+    fn pickup_codes_are_four_characters() {
         let generator = DefaultPickupCodeGenerator::new();
         for _ in 0..100 {
-            let code = generator.generate().unwrap();
-            assert_eq!(code.as_str().len(), 6);
-            assert!(
-                code.as_str()
-                    .chars()
-                    .all(|character| "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains(character))
-            );
+            let code = generator.generate();
+            assert_eq!(code.as_str().len(), 4);
         }
     }
 }

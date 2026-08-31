@@ -8,13 +8,6 @@ use std::time::SystemTime;
 use crate::catalog::ProductId;
 use crate::users::UserId;
 
-/// Maximum number of distinct product lines in one order.
-pub const MAX_ORDER_LINES: usize = 20;
-/// Maximum quantity of one product in one order.
-pub const MAX_QUANTITY_PER_PRODUCT: u32 = 20;
-/// Maximum total quantity across all consolidated order lines.
-pub const MAX_TOTAL_QUANTITY: u32 = 100;
-
 /// Strongly typed identifier for an [`Order`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OrderId(String);
@@ -182,7 +175,6 @@ pub struct Order {
     id: OrderId,
     student_id: UserId,
     items: Vec<OrderItem>,
-    total: u64,
     status: OrderStatus,
     pickup_code: PickupCode,
     created_at: SystemTime,
@@ -205,12 +197,10 @@ impl Order {
         if items.iter().any(|item| item.quantity == 0) {
             return Err(OrderError::InvalidQuantity);
         }
-        let total = checked_total(&items)?;
         Ok(Self {
             id,
             student_id,
             items,
-            total,
             status: OrderStatus::Pending,
             pickup_code,
             created_at,
@@ -249,7 +239,10 @@ impl Order {
 
     /// Returns the order total in minor units.
     pub fn total(&self) -> u64 {
-        self.total
+        self.items
+            .iter()
+            .map(|item| item.unit_price * u64::from(item.quantity))
+            .sum()
     }
 
     /// Moves the order to `target` when the transition is legal.
@@ -273,8 +266,6 @@ pub enum OrderError {
     EmptyOrder,
     /// Every item must have a quantity greater than zero.
     InvalidQuantity,
-    /// The order total cannot be represented safely in minor currency units.
-    TotalOverflow,
     /// The requested status change is not allowed.
     InvalidStatusTransition { from: OrderStatus, to: OrderStatus },
 }
@@ -284,22 +275,11 @@ impl fmt::Display for OrderError {
         match self {
             Self::EmptyOrder => write!(f, "an order must contain at least one item"),
             Self::InvalidQuantity => write!(f, "item quantity must be greater than zero"),
-            Self::TotalOverflow => write!(f, "the order total is too large"),
             Self::InvalidStatusTransition { from, to } => {
                 write!(f, "cannot transition order from '{from}' to '{to}'")
             }
         }
     }
-}
-
-fn checked_total(items: &[OrderItem]) -> Result<u64, OrderError> {
-    items.iter().try_fold(0_u64, |total, item| {
-        let subtotal = item
-            .unit_price
-            .checked_mul(u64::from(item.quantity))
-            .ok_or(OrderError::TotalOverflow)?;
-        total.checked_add(subtotal).ok_or(OrderError::TotalOverflow)
-    })
 }
 
 impl Error for OrderError {}
@@ -450,20 +430,6 @@ mod tests {
         assert_eq!(order.total(), 1000);
         assert_eq!(order.status(), OrderStatus::Pending);
         assert_eq!(order.pickup_code().as_str(), "A7F2");
-    }
-
-    #[test]
-    fn rejects_order_total_overflow() {
-        let err = Order::new(
-            OrderId::new("order_overflow"),
-            UserId::new("student_1"),
-            vec![OrderItem::new(ProductId::new("p1"), "Coxinha", u64::MAX, 2)],
-            PickupCode::new("A7F2"),
-            SystemTime::UNIX_EPOCH,
-        )
-        .unwrap_err();
-
-        assert_eq!(err, OrderError::TotalOverflow);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
 use cantina_core::catalog::{Category, CategoryId, Product, ProductId};
-use cantina_core::orders::{Order, OrderId, OrderStatus, PickupCode};
+use cantina_core::orders::{Order, OrderId, PickupCode};
 use cantina_core::users::{User, UserId};
 
 /// Storage failure surfaced by a repository adapter.
@@ -227,12 +227,6 @@ pub trait ProductRepository: Send + Sync {
     /// Finds a product by its identifier.
     async fn find_product_by_id(&self, id: &ProductId) -> Result<Option<Product>, RepositoryError>;
 
-    /// Finds all products for the supplied identifiers in one logical read.
-    async fn find_products_by_ids(
-        &self,
-        ids: &[ProductId],
-    ) -> Result<Vec<Product>, RepositoryError>;
-
     /// Lists every known product regardless of availability.
     ///
     /// Availability filtering is an application rule owned by the use case,
@@ -303,50 +297,11 @@ pub enum CatalogWriteError {
     Internal(String),
 }
 
-/// Failure while inserting a new order while enforcing order uniqueness.
-#[derive(Debug, Error)]
-pub enum OrderWriteError {
-    /// The generated pickup code is already assigned to another order.
-    #[error("the pickup code is already in use")]
-    PickupCodeConflict,
-    /// The generated order identifier is already assigned to another order.
-    #[error("the order identifier already exists")]
-    IdentifierConflict,
-    /// The repository failed internally.
-    #[error("storage failure: {0}")]
-    Internal(String),
-}
-
-/// Failure while atomically applying a domain-validated order status change.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum OrderStatusTransitionError {
-    /// No order exists for the requested identifier.
-    #[error("the order was not found")]
-    NotFound,
-    /// The current persisted status cannot move to the requested status.
-    #[error("cannot transition order from '{from}' to '{to}'")]
-    InvalidStatusTransition { from: OrderStatus, to: OrderStatus },
-    /// The repository failed internally.
-    #[error("storage failure: {0}")]
-    Internal(String),
-}
-
 /// Repository for [`Order`] aggregates.
 #[async_trait]
 pub trait OrderRepository: Send + Sync {
-    /// Atomically inserts a new order and enforces order/pickup-code uniqueness.
-    async fn save_new_order(&self, order: &Order) -> Result<(), OrderWriteError>;
-
-    /// Atomically applies a domain-validated status transition.
-    ///
-    /// An adapter must evaluate the current persisted status and apply the
-    /// transition as one mutation. A PostgreSQL adapter can implement this
-    /// with a transaction and row lock, or with a compare-and-swap update.
-    async fn transition_order_status(
-        &self,
-        id: &OrderId,
-        target: OrderStatus,
-    ) -> Result<Order, OrderStatusTransitionError>;
+    /// Persists an order (insert or update).
+    async fn save_order(&self, order: &Order) -> Result<(), RepositoryError>;
 
     /// Finds an order by its identifier.
     async fn find_order_by_id(&self, id: &OrderId) -> Result<Option<Order>, RepositoryError>;
@@ -383,15 +338,7 @@ pub trait IdGenerator: Send + Sync {
 }
 
 /// Generates short pickup codes for orders.
-#[derive(Debug, Error)]
-pub enum PickupCodeGenerationError {
-    /// The operating system random source failed.
-    #[error("secure pickup-code generation failed")]
-    Randomness,
-}
-
-/// Generates short pickup codes for orders.
 pub trait PickupCodeGenerator: Send + Sync {
     /// Generates a new pickup code.
-    fn generate(&self) -> Result<PickupCode, PickupCodeGenerationError>;
+    fn generate(&self) -> PickupCode;
 }

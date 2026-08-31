@@ -1,0 +1,167 @@
+{
+  "schemaVersion": 1,
+  "name": "Sabor Digital school cafeteria catalog",
+  "locale": "pt-BR",
+  "categories": [
+    { "id": "snacks", "name": "Lanches" },
+    { "id": "drinks", "name": "Bebidas" },
+    { "id": "sweets", "name": "Doces" },
+    { "id": "healthy", "name": "Saudáveis" }
+  ],
+  "products": [
+    {
+      "id": "hamburgao-duplo",
+      "name": "Hamburgão duplo",
+      "description": "Pão macio, dois hambúrgueres, queijo e molho da casa.",
+      "price": 900,
+      "category": "Lanche",
+      "categoryId": "snacks",
+      "image": "/assets/buns.png.b64",
+      "tone": "cream",
+      "available": true
+    },
+    {
+      "id": "coxinha-frango",
+      "name": "Coxinha de frango",
+      "description": "Massa crocante com recheio cremoso de frango.",
+      "price": 650,
+      "category": "Lanche",
+      "categoryId": "snacks",
+      "image": "/assets/buns.png.b64",
+      "tone": "peach",
+      "available": true
+    },
+    {
+      "id": "pao-de-queijo",
+      "name": "Pão de queijo",
+      "description": "Porção quentinha com aquele sabor mineiro.",
+      "price": 450,
+      "category": "Lanche",
+      "categoryId": "snacks",
+      "image": "/assets/pao-de-queijo.png.b64",
+      "tone": "yellow",
+      "available": true
+    },
+    {
+      "id": "pastel-carne",
+      "name": "Pastel de carne",
+      "description": "Pastel sequinho recheado com carne temperada.",
+      "price": 700,
+      "category": "Lanche",
+      "categoryId": "snacks",
+      "image": "/assets/buns.png.b64",
+      "tone": "peach",
+      "available": true
+    },
+    {
+      "id": "misto-quente",
+      "name": "Misto quente",
+      "description": "Pão tostado com presunto e queijo derretido.",
+      "price": 600,
+      "category": "Lanche",
+      "categoryId": "snacks",
+      "image": "/assets/buns.png.b64",
+      "tone": "cream",
+      "available": true
+    },
+    {
+      "id": "tapioca-queijo",
+      "name": "Tapioca de queijo",
+      "description": "Tapioca preparada na hora com queijo branco.",
+      "price": 550,
+      "category": "Lanche",
+      "categoryId": "snacks",
+      "image": "/assets/pao-de-queijo.png.b64",
+      "tone": "yellow",
+      "available": true
+    },
+    {
+      "id": "suco-laranja",
+      "name": "Suco de laranja",
+      "description": "Suco natural gelado, 300 ml.",
+      "price": 400,
+      "category": "Bebida",
+      "categoryId": "drinks",
+      "image": "/assets/suco-laranja.png.b64",
+      "tone": "cream",
+      "available": true
+    },
+    {
+      "id": "suco-goiaba",
+      "name": "Suco de goiaba",
+      "description": "Bebida de goiaba gelada, 300 ml.",
+      "price": 400,
+      "category": "Bebida",
+      "categoryId": "drinks",
+      "image": "/assets/suco-laranja.png.b64",
+      "tone": "peach",
+      "available": true
+    },
+    {
+      "id": "agua-mineral",
+      "name": "Água mineral",
+      "description": "Garrafa de 500 ml sem gás.",
+      "price": 300,
+      "category": "Bebida",
+      "categoryId": "drinks",
+      "image": "/assets/suco-laranja.png.b64",
+      "tone": "blue",
+      "available": true
+    },
+    {
+      "id": "achocolatado",
+      "name": "Achocolatado",
+      "description": "Bebida láctea de chocolate, 200 ml.",
+      "price": 350,
+      "category": "Bebida",
+      "categoryId": "drinks",
+      "image": "/assets/suco-laranja.png.b64",
+      "tone": "brown",
+      "available": true
+    },
+    {
+      "id": "bolo-cenoura",
+      "name": "Bolo de cenoura",
+      "description": "Fatia fofinha com cobertura de chocolate.",
+      "price": 500,
+      "category": "Doce",
+      "categoryId": "sweets",
+      "image": "/assets/buns.png.b64",
+      "tone": "brown",
+      "available": true
+    },
+    {
+      "id": "brigadeiro",
+      "name": "Brigadeiro",
+      "description": "Doce brasileiro de chocolate com granulado.",
+      "price": 250,
+      "category": "Doce",
+      "categoryId": "sweets",
+      "image": "/assets/buns.png.b64",
+      "tone": "brown",
+      "available": true
+    },
+    {
+      "id": "salada-de-frutas",
+      "name": "Salada de frutas",
+      "description": "Mix gelado de frutas da estação.",
+      "price": 550,
+      "category": "Saudável",
+      "categoryId": "healthy",
+      "image": "/assets/suco-laranja.png.b64",
+      "tone": "green",
+      "available": true
+    },
+    {
+      "id": "sanduiche-natural",
+      "name": "Sanduíche natural",
+      "description": "Pão integral, frango, queijo, tomate e salada.",
+      "price": 700,
+      "category": "Saudável",
+      "categoryId": "healthy",
+      "image": "/assets/buns.png.b64",
+      "tone": "green",
+      "available": true
+    }
+  ]
+}
