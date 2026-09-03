@@ -1,3 +1,5 @@
+import { hashCredential, saveLocalAccount } from './api.js';
+
 const registerModalMarkup = `
   <div class="register-modal" data-register-modal hidden>
     <div class="register-backdrop" data-register-close></div>
@@ -102,7 +104,7 @@ export function initRegisterModal() {
     }
   });
 
-  document.addEventListener('submit', (event) => {
+  document.addEventListener('submit', async (event) => {
     const form = event.target instanceof HTMLFormElement ? event.target : null;
     if (!form?.matches('[data-register-form]')) return;
     event.preventDefault();
@@ -116,7 +118,27 @@ export function initRegisterModal() {
       if (status) status.textContent = 'Confira a confirmação da senha.';
       return;
     }
-    if (status) status.textContent = 'A interface está pronta para conectar ao cadastro da escola.';
+    const submit = form.querySelector('.register-submit');
+    if (submit) submit.disabled = true;
+    if (status) status.textContent = 'Criando sua conta...';
+    try {
+      const name = form.elements.name.value.trim();
+      const email = form.elements.email.value.trim().toLowerCase();
+      const studentId = form.elements.studentId.value.trim();
+      saveLocalAccount({
+        id: `local_${Date.now()}`,
+        name,
+        email,
+        studentId,
+        className: 'Turma não informada',
+        passwordHash: await hashCredential(password.value),
+      });
+      if (status) status.textContent = 'Conta criada. Agora você já pode entrar.';
+    } catch {
+      if (status) status.textContent = 'Não foi possível criar a conta agora.';
+    } finally {
+      if (submit) submit.disabled = false;
+    }
   });
 
   document.addEventListener('keydown', (event) => {

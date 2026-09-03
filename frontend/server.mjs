@@ -21,7 +21,7 @@ const contentTypes = {
 
 function resolveRequestPath(requestPath) {
   const pathname = decodeURIComponent(new URL(requestPath, 'http://localhost').pathname);
-  const appRoutes = new Set(['/cardapio', '/carrinho', '/meus-pedidos', '/login', '/cadastro']);
+  const appRoutes = new Set(['/cardapio', '/carrinho', '/meus-pedidos', '/login', '/cadastro', '/cantina']);
   const relativePath = pathname === '/' || appRoutes.has(pathname) ? 'index.html' : pathname.slice(1);
   const root = pathname.startsWith('/assets/') ? publicRoot : frontendRoot;
   const requestedPath = relativePath;

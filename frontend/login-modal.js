@@ -1,4 +1,4 @@
-import { apiErrorMessage, apiRequest, setAccessToken } from './api.js';
+import { apiErrorMessage, apiRequest, authenticateLocalUser, isCanteenUser, saveActiveUser, setAccessToken } from './api.js';
 
 const loginModalMarkup = `
   <div class="login-modal" data-login-modal hidden>
@@ -97,23 +97,39 @@ export function initLoginModal({ onRegister } = {}) {
     if (submit) submit.disabled = true;
     if (status) status.textContent = 'Entrando...';
 
-    apiRequest('/api/v1/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({
-        email: form.elements.email.value.trim(),
-        password: form.elements.password.value,
-      }),
-    })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(await apiErrorMessage(response, 'E-mail ou senha inválidos.'));
-        const payload = await response.json();
-        setAccessToken(payload.access_token);
-        if (status) status.textContent = `Bem-vindo, ${payload.user?.name || 'estudante'}!`;
-        window.setTimeout(closeLoginModal, 600);
-      })
-      .catch((error) => {
-        if (status) status.textContent = error.message || 'Não foi possível entrar agora.';
-      })
+    (async () => {
+      let apiFailure = new Error('E-mail ou senha inválidos.');
+      try {
+        const response = await apiRequest('/api/v1/auth/login', {
+          method: 'POST',
+          body: JSON.stringify({
+            email: form.elements.email.value.trim(),
+            password: form.elements.password.value,
+          }),
+        });
+        if (response.ok) {
+          const payload = await response.json();
+          setAccessToken(payload.access_token);
+          saveActiveUser(payload.user);
+          document.dispatchEvent(new CustomEvent('user-authenticated', { detail: payload.user }));
+          if (status) status.textContent = `Bem-vindo, ${payload.user?.name || 'estudante'}!`;
+          window.setTimeout(() => { closeLoginModal(); if (isCanteenUser(payload.user)) window.location.href = '/cantina'; }, 600);
+          return;
+        }
+        apiFailure = new Error(await apiErrorMessage(response, 'E-mail ou senha inválidos.'));
+      } catch (error) {
+        apiFailure = error;
+      }
+
+      const localUser = await authenticateLocalUser(form.elements.email.value, form.elements.password.value);
+      if (!localUser) throw apiFailure;
+      setAccessToken(`local:${localUser.id}`);
+      saveActiveUser(localUser);
+      document.dispatchEvent(new CustomEvent('user-authenticated', { detail: localUser }));
+      if (status) status.textContent = `Bem-vindo, ${localUser.name}!`;
+      window.setTimeout(() => { closeLoginModal(); if (isCanteenUser(localUser)) window.location.href = '/cantina'; }, 600);
+    })()
+      .catch((error) => { if (status) status.textContent = error.message || 'Não foi possível entrar agora.'; })
       .finally(() => {
         if (submit) submit.disabled = false;
       });
